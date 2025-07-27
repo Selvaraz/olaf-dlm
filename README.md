@@ -107,3 +107,16 @@ python opal/export/quantize_onnx.py \
 ```
 
 
+# Logging and Monitoring dashboards
+
+Wandb is used to log the training and validation loss, and the model checkpoints. Tensorboard is used to log the training and validation loss, and the model checkpoints. We can use either of them to monitor the training process. Follow the below steps.
+
+## Tensorboard
+
+The tensorboard logging is stored in the runtime directory. To start the tensorboard server run the following command:
+
+```
+tensorboard --logdir {RUNTIME_ROOT_PATH}/runs
+```
+
+

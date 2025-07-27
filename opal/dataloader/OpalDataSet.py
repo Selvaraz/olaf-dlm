@@ -1,13 +1,20 @@
 import torch
 from torch.utils.data import Dataset
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 class OpalDataset(Dataset):
-    def __init__(self, txt: str, tokenizer, max_length: int = 1280, stride: int = 256, device: str = "cpu"):
+    def __init__(
+        self,
+        txt: Union[str, torch.Tensor],
+        tokenizer=None,
+        max_length: int = 1280,
+        stride: int = 256,
+        device: str = "cpu"
+    ):
         """
         Args:
-            txt: Raw input text (str)
-            tokenizer: SentencePieceProcessor instance (e.g., spm.SentencePieceProcessor)
+            txt: Raw input text (str) OR pre-tokenized IDs (torch.Tensor)
+            tokenizer: SentencePieceProcessor instance (needed only if txt is str)
             max_length: Max context window (default 1280 for your model)
             stride: Overlap between consecutive chunks
             device: Device to move tensors to ('cpu' or 'cuda')
@@ -17,15 +24,29 @@ class OpalDataset(Dataset):
         self.stride = stride
         self.device = device
 
-        # Prepare token chunks
+        # Prepare token chunks (handles both raw text and token IDs)
         self.input_ids, self.target_ids = self._prepare_data(txt)
 
-    def _prepare_data(self, txt: str) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-        token_ids = self.tokenizer.encode(txt, out_type=int)
+    def _prepare_data(self, txt: Union[str, torch.Tensor]) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        """
+        Prepares input and target token chunks.
+
+        If txt is a string → tokenizes using self.tokenizer.
+        If txt is a torch.Tensor → assumes already tokenized.
+        """
+        if isinstance(txt, torch.Tensor):
+            token_ids = txt.tolist()
+            print(f"[OpalDataset] Using pre-tokenized token IDs (length={len(token_ids)})")
+        elif isinstance(txt, str):
+            assert self.tokenizer is not None, "Tokenizer must be provided when input is raw text"
+            token_ids = self.tokenizer.encode(txt, out_type=int)
+            print(f"[OpalDataset] Tokenized raw text into {len(token_ids)} tokens")
+        else:
+            raise ValueError("txt must be either a raw text string or a torch.Tensor of token IDs")
+
         input_chunks = []
         target_chunks = []
 
-        print(f"[OpalDataset] Total tokens: {len(token_ids)}")
         print(f"[OpalDataset] Generating chunks with max_length={self.max_length}, stride={self.stride}...")
 
         for i in range(0, len(token_ids) - self.max_length, self.stride):

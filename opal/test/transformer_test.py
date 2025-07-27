@@ -49,9 +49,10 @@ def model_pretrain_test():
         config=OPAL_MODEL_CONFIG,
         device=device,
         tokenizer=sp,
-        corpus_text=opalInstance.loadTrainingData(),
+        corpus_text=opalInstance.loadTrainingData(token_model=OpalConstants.TOKENIZER_MODEL_PATH),
         checkpoint_path=OpalConstants.CHECKPOINT_PATH,
-        num_epochs=3
+        num_epochs=3,
+        log_to_tensorboard=True,
     )
 
 def model_train_test_():
@@ -90,7 +91,7 @@ def model_train_test_():
 
     # Step 1: Load the training data (complete text corpus as a string)
     print("Loading training data...")
-    total_corpus = opalInstance.loadTrainingData()
+    total_corpus = opalInstance.loadTrainingData(token_model=OpalConstants.TOKENIZER_MODEL_PATH)
 
     # Step 2: Split the corpus into training and validation datasets
     train_ratio = 0.90

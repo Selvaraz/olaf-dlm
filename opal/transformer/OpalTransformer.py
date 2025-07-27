@@ -3,7 +3,7 @@ import torch.nn as nn
 from .FeedForward import FeedForward
 from ..attention.multihead_attention import MultiheadAttention
 
-# ASCII Diagram for OpalTransformerBlock
+# Diagram for OpalTransformerBlock
 
 # +---------------------------+
 # |   OpalTransformerBlock    |
