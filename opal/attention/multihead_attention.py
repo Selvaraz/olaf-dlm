@@ -54,6 +54,11 @@ class MultiheadAttention(torch.nn.Module):
         # This means that each attention head will have a dimension of 8.
         self.head_dim = d_out // num_heads
 
+        # Calculate the scale factor for the attention scores
+        # The scale factor is used to normalize the attention scores.
+        # The scale factor is calculated as the square root of the head dimension.
+        self.scale = self.head_dim ** -0.5 
+
         # Create linear layers for the query, key, and value matrices
         # These layers will transform the input embeddings into the query, key, and value matrices.
         # The query, key, and value matrices are used to compute the attention scores.

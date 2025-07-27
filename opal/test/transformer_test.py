@@ -4,7 +4,7 @@ from ..transformer.OpalGPTModel import OpalGPT
 from ..opalmain.opal_trainer import Opal
 from ..utils.opal_constants import OpalConstants
 from ..utils.training_utils import estimate_training_time_from_config
-
+import torch
 import time
 import multiprocessing
 
@@ -38,19 +38,23 @@ OPAL_MODEL_CONFIG = GPT_CONFIG_OPAL_FINAL
 # Load SentencePiece tokenizer
 sp = spm.SentencePieceProcessor()
 sp.load(OpalConstants.TOKENIZER_MODEL_PATH)
-
 # Create Opal instance with tokenizer
 opalInstance = Opal(config=OPAL_MODEL_CONFIG, tokenizer=sp)
-
 torch.manual_seed(123)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+def model_pretrain_test():
+    opalInstance.train_and_save_model(
+        model_class=OpalGPT,
+        config=OPAL_MODEL_CONFIG,
+        device=device,
+        tokenizer=sp,
+        corpus_text=opalInstance.loadTrainingData(),
+        checkpoint_path=OpalConstants.CHECKPOINT_PATH,
+        num_epochs=3
+    )
 
-import torch
-import time
-import multiprocessing
-
-def model_train_test():
+def model_train_test_():
     start_time = time.time()
 
     # Set the random seed for reproducibility
@@ -64,20 +68,25 @@ def model_train_test():
     # Try to load existing model checkpoint if available
     try:
         print(f"Attempting to load model checkpoint from {OpalConstants.CHECKPOINT_PATH}...")
-        model = opalInstance.load_model_checkpoint(OpalGPT, OpalConstants.CHECKPOINT_PATH, device)
+        model, optimizer_state_dict, scheduler_state_dict, epoch, train_losses, val_losses, config, tokenizer_model = \
+            opalInstance.load_model_checkpoint(OpalGPT, OpalConstants.CHECKPOINT_PATH, device)
         print("Successfully loaded model checkpoint!")
     except Exception as e:
         print(f"No checkpoint found or error loading checkpoint: {str(e)}")
         print(e)
         # Exit the program
         exit(1)
-        
+    
+    num_epochs = 10
 
     # Create an AdamW optimizer that will update the model's parameters
     # based on the gradients computed during backpropagation.
     # The learning rate is set to 0.0004 and the weight decay is set to 0.1.
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.0004, weight_decay=0.1)
-    num_epochs = 10
+
+    # Load the optimizer state if available
+    if optimizer_state_dict:
+        optimizer.load_state_dict(optimizer_state_dict)
 
     # Step 1: Load the training data (complete text corpus as a string)
     print("Loading training data...")
@@ -125,12 +134,12 @@ def model_train_test():
 
     # Sanity check to ensure enough tokens exist for training and validation
     if total_tokens * train_ratio < OPAL_MODEL_CONFIG["context_length"]:
-        print("Not enough tokens for the training loader. "
+        print("⚠️ Not enough tokens for the training loader. "
               "Try to lower the `OPAL_MODEL_CONFIG['context_length']` or "
               "increase the `training_ratio`")
 
     if total_tokens * (1-train_ratio) < OPAL_MODEL_CONFIG["context_length"]:
-        print("Not enough tokens for the validation loader. "
+        print("⚠️ Not enough tokens for the validation loader. "
               "Try to lower the `OPAL_MODEL_CONFIG['context_length']` or "
               "decrease the `training_ratio`")
 
@@ -143,6 +152,20 @@ def model_train_test():
     # Calculate total number of tokens in training and validation sets
     train_tokens = sum(input_batch.numel() for input_batch, _ in training_loader)
     val_tokens = sum(input_batch.numel() for input_batch, _ in val_loader)
+
+    # After creating training_loader, letx calculate the number of steps, which we will use 
+    # for scheduler
+    total_steps = num_epochs * len(training_loader)
+
+    # Create a scheduler to adjust learning rate during training. The scheduler will 
+    # use a cosine annealing schedule to reduce the learning rate as training progresses.
+    # This helps in fine-tuning the model and can lead to better performance.
+    # The scheduler will use the total number of steps as the maximum number of steps.
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+
+    # Load the scheduler state if available    
+    if scheduler_state_dict:
+        scheduler.load_state_dict(scheduler_state_dict)
 
     print("Training tokens:", train_tokens)
     print("Validation tokens:", val_tokens)
@@ -169,6 +192,7 @@ def model_train_test():
         model=model,
         train_loader=training_loader,
         val_loader=val_loader,
+        scheduler=scheduler,
         tokenizer=sp,
         optimizer=optimizer,
         device=device,
@@ -182,10 +206,11 @@ def model_train_test():
     epochs_tensor = torch.linspace(1, num_epochs, len(train_losses))
 
     #Save the model
-    checkpoint_path =opalInstance.save_model_checkpoint(OPAL_MODEL_CONFIG, model, optimizer, 
-                                       num_epochs, 
-                                       train_losses, val_losses, 
-                                       OpalConstants.TOKENIZER_MODEL_PATH)
+    checkpoint_path =opalInstance.save_model_checkpoint(OPAL_MODEL_CONFIG, 
+                                    model, optimizer, scheduler, 
+                                    num_epochs, 
+                                    train_losses, val_losses, 
+                                    OpalConstants.TOKENIZER_MODEL_PATH)
     opalInstance.plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses, checkpoint_path)
 
 
@@ -250,4 +275,4 @@ def transformer_test():
 
 calculate_model_size()
 
-model_train_test()
+model_pretrain_test()

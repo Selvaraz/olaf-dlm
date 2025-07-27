@@ -86,3 +86,24 @@ options:
   --output OUTPUT  Name of the output file that will contain all merged and deduplicated text. The file will be created in the root directory. If a
                    file with the same name exists, it will be overwritten.
 ```
+
+
+# Export to ONNX
+
+```
+python opal/export/export_onnx.py \
+  --checkpoint checkpoints/opal_checkpoint_epoch10.pt \
+  --output checkpoints/opal_model.onnx \
+  --device cpu
+
+```
+  
+# Quantize ONNX model
+
+```
+python opal/export/quantize_onnx.py \
+  --input checkpoints/opal_model.onnx \
+  --output checkpoints/opal_model_int8.onnx
+```
+
+

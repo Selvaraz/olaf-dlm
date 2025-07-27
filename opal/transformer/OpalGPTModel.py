@@ -36,7 +36,22 @@ class OpalGPT(nn.Module):
         self.out_head = nn.Linear(
             cfg["emb_dim"], cfg["vocab_size"], bias=False
         )
-    def forward(self, in_idx):
+
+        self.apply(self._init_weights)
+
+    # Initialize the weights of the model, the reason for this 
+    # initialization is to make the model learnable and to 
+    # prevent the model from learning the same pattern in the 
+    # input data.
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, input_token_ids):
         """
         Compute the output of the GPT model given an input sequence.
 
@@ -51,14 +66,31 @@ class OpalGPT(nn.Module):
             Output logits of shape (batch_size, sequence_length, vocab_size)
         """
         
-        batch_size, seq_len = in_idx.shape
-        tok_embeds = self.token_embeddings(in_idx)
+        # Get the batch size and sequence length from the input token IDs
+        batch_size, seq_len = input_token_ids.shape
+        
+        # Get the token embeddings for the input token IDs
+        tok_embeds = self.token_embeddings(input_token_ids)
+        
+        # Get the positional embeddings for the input token IDs
         pos_embeds = self.positional_embeddings(
-        torch.arange(seq_len, device=in_idx.device)
+            torch.arange(seq_len, device=input_token_ids.device)
         )
+        
+        # Add the token embeddings and positional embeddings
         x = tok_embeds + pos_embeds
+        
+        # Apply dropout to the embeddings
         x = self.drop_embeddings(x)
+        
+        # Pass the embeddings through the transformer blocks
         x = self.transformers_block(x)
+        
+        # Apply layer normalization to the output of the transformer blocks
         x = self.final_norm(x)
+        
+        # Get the logits for the output of the final layer normalization
         logits = self.out_head(x)
+        
+        # Return the logits
         return logits
