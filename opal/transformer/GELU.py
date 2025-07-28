@@ -1,4 +1,5 @@
 import torch
+import math
 import torch.nn as nn
 
 # The GELU (Gaussian Error Linear Unit) activation function is a smooth, non-monotonic
@@ -18,6 +19,11 @@ class GELU(nn.Module):
         a simple class that inherits from nn.Module and has no parameters.
         """
         super().__init__()
+        # Precompute the constant sqrt(2/pi) as a Python float.
+        # Using math.sqrt ensures it is treated as a constant in ONNX export,
+        # avoiding TracerWarning during torch.onnx.export().
+        self.sqrt_2_over_pi = math.sqrt(2.0 / math.pi)
+
     def forward(self, x):
         """
         This is the forward pass of the GELU activation function. It takes
@@ -29,6 +35,5 @@ class GELU(nn.Module):
         it suitable for large-scale models.
         """
         return 0.5 * x * (1 + torch.tanh(
-        torch.sqrt(torch.tensor(2.0 / torch.pi)) *
-        (x + 0.044715 * torch.pow(x, 3))
+            self.sqrt_2_over_pi * (x + 0.044715 * torch.pow(x, 3))
         ))

@@ -4,22 +4,23 @@ from ..transformer.OpalGPTModel import OpalGPT
 from ..opalmain.opal_trainer import Opal
 from ..utils.opal_constants import OpalConstants
 from ..utils.training_utils import estimate_training_time_from_config
+from ..config.opal_config import OPAL_MODEL_CONFIG
 import torch
 import time
 import multiprocessing
 
 # Model config
-GPT_CONFIG_OPAL_FINAL = {
-    "vocab_size": 8000,       # Enough for Cisco CLI + logs
-    "context_length": 768,    # Can handle moderate logs
-    "emb_dim": 192,           # Rich token embeddings
-    "n_heads": 6,             # Balanced attention diversity
-    "n_layers": 10,           # Enough depth for summarization
-    "drop_rate": 0.1,
-    "transformer_drop_rate": 0.1,
-    "attention_drop_rate": 0.1,
-    "qkv_bias": False
-}
+# GPT_CONFIG_OPAL_FINAL = {
+#     "vocab_size": 8000,       # Enough for Cisco CLI + logs
+#     "context_length": 768,    # Can handle moderate logs
+#     "emb_dim": 192,           # Rich token embeddings
+#     "n_heads": 6,             # Balanced attention diversity
+#     "n_layers": 10,           # Enough depth for summarization
+#     "drop_rate": 0.1,
+#     "transformer_drop_rate": 0.1,
+#     "attention_drop_rate": 0.1,
+#     "qkv_bias": False
+# }
 
 # OPAL_MODEL_CONFIG = {
 #     "vocab_size": 8000,
@@ -33,7 +34,7 @@ GPT_CONFIG_OPAL_FINAL = {
 #     "qkv_bias": False
 # }
 
-OPAL_MODEL_CONFIG = GPT_CONFIG_OPAL_FINAL
+#OPAL_MODEL_CONFIG = GPT_CONFIG_OPAL_FINAL
 
 # Load SentencePiece tokenizer
 sp = spm.SentencePieceProcessor()
@@ -51,8 +52,10 @@ def model_pretrain_test():
         tokenizer=sp,
         corpus_text=opalInstance.loadTrainingData(token_model=OpalConstants.TOKENIZER_MODEL_PATH),
         checkpoint_path=OpalConstants.CHECKPOINT_PATH,
-        num_epochs=3,
+        num_epochs=OPAL_MODEL_CONFIG["num_epoch"],
         log_to_tensorboard=True,
+        lr=OPAL_MODEL_CONFIG["learning_rate"],
+        weight_decay=OPAL_MODEL_CONFIG["weight_decay"]
     )
 
 def model_train_test_():

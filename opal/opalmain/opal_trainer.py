@@ -7,14 +7,18 @@ import shutil
 import psutil
 import torch
 import tiktoken
+import git
+from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from ..dataloader.OpalDataSet import OpalDataset
 from torch.utils.data import Dataset, DataLoader
 from ..utils.opal_constants import OpalConstants
+from ..export.export_onnx import export_and_quantize_model
+
 import sentencepiece as spm
 from tqdm import tqdm
-
+from ..export.opal_evaluator import evaluate_pytorch, evaluate_onnx
 
 #For TensorBoard logging
 from torch.utils.tensorboard import SummaryWriter
@@ -23,9 +27,10 @@ import wandb
 
 
 class Opal:
-    def __init__(self, config, tokenizer=None):
+    def __init__(self, config, tokenizer=None, start_fresh=False):
         self.config = config
         self.tokenizer = tokenizer
+        self.start_fresh = start_fresh
     
     def createOpalDataLoader(
         self,
@@ -145,7 +150,11 @@ class Opal:
 
         with open(input_text_file, "r") as f:
             text = f.read()
-
+        
+        if self.check_new_tokens(text) and not self.start_fresh:
+            print(f"🚨🚨🚨 New tokens found in text. Pretokenizing corpus...")
+            raise ValueError("New tokens found in text. Please start training from scratch with start_fresh=True")
+            
         token_ids = torch.tensor(sp.encode(text, out_type=int), dtype=torch.long)
         torch.save(token_ids, output_file)
 
@@ -163,10 +172,7 @@ class Opal:
             str: The content of the text file as a string.
         """
         txt = None
-        import os
-        import git
-        from pathlib import Path
-
+    
         repo = git.Repo(os.path.dirname(os.path.realpath(__file__)), search_parent_directories=True)
         repo_dir = Path(repo.git.rev_parse("--show-toplevel"))
 
@@ -185,9 +191,8 @@ class Opal:
         else:
             print(f"❌ Pre-tokenized dataset not found: {pretokenized_path}")
             print(f"Loading raw text from: {file_path}")
-            with open(file_path, "r") as f:
-                txt = f.read()
             self._pretokenize_corpus(file_path, token_model, pretokenized_path)
+            print(f"✅ Pre-tokenized dataset saved to {pretokenized_path}")
             return torch.load(pretokenized_path)
 
     # Ex: top_p=0.9 and optionally temperature > 0.7
@@ -581,7 +586,7 @@ class Opal:
 
         # Create a directory with current date and save the model inside the path
         date_dir = datetime.now().strftime("%Y%m%d")
-        checkpoint_dir = os.path.join(OpalConstants.CHECKPOINT_DIR, f"opal_checkpoint_{date_dir}")
+        checkpoint_dir = os.path.join(OpalConstants.CHECKPOINT_DIR, date_dir, timestamp)
         os.makedirs(checkpoint_dir, exist_ok=True)
         checkpoint_path = os.path.join(checkpoint_dir, f"opal_gpt_checkpoint_{timestamp}.pt")
         
@@ -603,7 +608,7 @@ class Opal:
         return checkpoint_path
 
 
-    def load_model_checkpoint(self, model_class, checkpoint_path, device="cpu"):
+    def load_model_checkpoint(self, model_class, checkpoint_path, device="cpu", start_fresh=False):
         """
         Loads a trained model checkpoint and restores model, optimizer, and training state.
 
@@ -611,6 +616,7 @@ class Opal:
             model_class (type): The class of the model (e.g., OpalGPT).
             checkpoint_path (str): Path to the checkpoint file.
             device (str): Device to load model on ('cpu' or 'cuda').
+            start_fresh (bool): Whether to start training from scratch.
 
         Returns:
             model (torch.nn.Module): Loaded model with restored weights.
@@ -623,11 +629,13 @@ class Opal:
         checkpoint = {}
         optimizer_state_dict= None
         scheduler_state_dict = None
-        if not os.path.isfile(os.path.realpath(checkpoint_path)):
-            print(f"Checkpoint {checkpoint_path} not found. Creating new model.")
-            model = model_class(config).to(device)
+        config = self.config
+        
+        if (not os.path.isfile(os.path.realpath(checkpoint_path))) or start_fresh:
+            print(f"⚠️ Checkpoint {checkpoint_path} not found (or) start_fresh is requested. Creating new model.")
+            model = model_class(self.config).to(device)
         else:
-            print(f"Model loaded from {checkpoint_path}")
+            print(f"✅ Model loaded from {checkpoint_path}")
             checkpoint = torch.load(os.path.realpath(checkpoint_path), map_location=device)
             # Load model with saved config to ensure same architecture
             config = checkpoint["config"]
@@ -701,24 +709,102 @@ class Opal:
     # {"prompt": "", "response": ""}
     # {"prompt": "", "response": ""}
     # 
-    def load_instruction_dataset(jsonl_file, tokenizer, max_length=768):
+    def load_instruction_dataset(self, jsonl_file, max_length=768):
         all_ids = []
         # Load the jsonl file
         with open(jsonl_file, "r") as f:
             # for each line in the jsonl file, each line is 
             # {"prompt": "", "response": ""}
             for line in f:
+                if self.check_new_tokens(line):
+                    print("🚨 New tokens found in instruction dataset, please start training from scratch with start_fresh=True")
+                    raise ValueError("New tokens found in instruction dataset, please start training from scratch with start_fresh=True")
+
                 # Load the json line
                 item = json.loads(line)
                 # Tokenize the prompt and response
-                prompt_ids = tokenizer.encode(item["prompt"], out_type=int)
-                response_ids = tokenizer.encode(item["response"], out_type=int)
+                prompt_ids = self.tokenizer.encode(item["prompt"], out_type=int)
+                response_ids = self.tokenizer.encode(item["response"], out_type=int)
                 # Combine the prompt and response
                 combined = prompt_ids + response_ids
                 # Truncate the combined ids to max_length
                 combined = combined[:max_length]
                 all_ids.extend(combined)
         return torch.tensor(all_ids, dtype=torch.long)
+
+    def _evaluate_and_log_models(
+        self,
+        final_ckpt: str,
+        val_loader,
+        device: str,
+        writer=None,
+        log_to_wandb=False
+    ):
+        """
+        Evaluates both the trained PyTorch model and its quantized ONNX version.
+        Logs final metrics to console, TensorBoard, and Weights & Biases.
+
+        Args:
+            final_ckpt (str): Path to final PyTorch checkpoint (.pt file)
+            val_loader (DataLoader): Validation DataLoader (already created in parent function)
+            device (str): "cpu" or "cuda"
+            writer: TensorBoard SummaryWriter (optional)
+            log_to_wandb (bool): Whether to log metrics to W&B
+        """
+
+        # 1. Evaluate PyTorch model
+        final_loss, final_ppl = evaluate_pytorch(final_ckpt, val_loader, device)
+        print(f"Final PyTorch Model Eval -> Loss={final_loss:.4f}, Perplexity={final_ppl:.4f}")
+
+        # 2. Export to ONNX + Quantize
+        onnx_path = final_ckpt.replace(".pt", ".onnx")
+        quant_path = final_ckpt.replace(".pt", "_quantized.onnx")
+
+        export_and_quantize_model(
+            config=self.config,
+            checkpoint_path=final_ckpt,
+            onnx_output_path=onnx_path,
+            quantized_output_path=quant_path,
+            device=device
+        )
+
+        # 3. Evaluate Quantized ONNX model
+        onnx_loss, onnx_ppl = evaluate_onnx(quant_path, val_loader, device)
+        print(f"Final Quantized ONNX Eval -> Loss={onnx_loss:.4f}, Perplexity={onnx_ppl:.4f}")
+
+        # 4. Log metrics to TensorBoard
+        if writer:
+            writer.add_scalar("Eval/Loss_PyTorch", final_loss)
+            writer.add_scalar("Eval/Perplexity_PyTorch", final_ppl)
+            writer.add_scalar("Eval/Loss_ONNX", onnx_loss)
+            writer.add_scalar("Eval/Perplexity_ONNX", onnx_ppl)
+
+        # 5. Log metrics to W&B
+        if log_to_wandb:
+            wandb.log({
+                "final_loss_pytorch": final_loss,
+                "final_ppl_pytorch": final_ppl,
+                "final_loss_onnx": onnx_loss,
+                "final_ppl_onnx": onnx_ppl
+            })
+
+        return {
+            "pytorch_loss": final_loss,
+            "pytorch_ppl": final_ppl,
+            "onnx_loss": onnx_loss,
+            "onnx_ppl": onnx_ppl,
+            "onnx_model": onnx_path,
+            "quant_model": quant_path
+        }
+    
+    def check_new_tokens(self, texts):
+        new_tokens_found = False
+        for text in texts:
+            tokens = self.tokenizer.encode(text, out_type=str)
+            if "<unk>" in tokens:
+                print(f"⚠️ New tokens found in text: {text}")
+                new_tokens_found = True
+        return new_tokens_found
 
     # Train and save model, Main training loop function
     # to train the model from scratch or continue training
@@ -742,7 +828,8 @@ class Opal:
             is_finetune=False,
             log_to_tensorboard=True,   # Enable TensorBoard logging
             log_to_wandb=False,        # Enable W&B logging
-            wandb_project="opal-training"  # W&B project name
+            wandb_project="opal-training",  # W&B project name
+            start_fresh=False
         ):
             """
             Reusable utility to train, continue pretraining, or fine-tune a model.
@@ -806,13 +893,15 @@ class Opal:
             try:
                 print(f"Attempting to load model checkpoint from {checkpoint_path}...")
                 model, optimizer_state_dict, scheduler_state_dict, epoch, train_losses, val_losses, _ = \
-                    self.load_model_checkpoint(model_class, checkpoint_path, device)
-                print("-- Successfully loaded model checkpoint!")
+                    self.load_model_checkpoint(model_class, checkpoint_path, device, start_fresh)
+                print("✅ Successfully loaded model checkpoint!")
             except Exception as e:
                 print(f"⚠️ No checkpoint found. Training from scratch: {e}")
                 model = model_class(config).to(device)
                 optimizer_state_dict, scheduler_state_dict = None, None
                 train_losses, val_losses, epoch = [], [], 0
+                traceback.print_exc()
+
 
             # ----------------------------------------
             #  Step 2: Create optimizer
@@ -908,11 +997,36 @@ class Opal:
                 timestamp=timestamp
             )
 
+            # Export the model to ONNX
+            # ----------------------------------------
+            onnx_path = checkpoint_path.replace(".pt", ".onnx")
+            quant_path = checkpoint_path.replace(".pt", "_quantized.onnx")
+
+            export_and_quantize_model(
+                config,
+                final_ckpt,
+                onnx_path,
+                quant_path,
+                device="cuda" if torch.cuda.is_available() else "cpu"
+            )
+
             # ----------------------------------------
             #  Step 8: Plot training & validation loss curves
             # ----------------------------------------
             epochs_tensor = torch.linspace(epoch + 1, epoch + num_epochs, len(train_losses))
             self.plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses, final_ckpt)
+
+            # ----------------------------------------
+            # Step 9: Evaluate both models (PT & ONNX)
+            # ----------------------------------------
+            
+            results = self._evaluate_and_log_models(
+                final_ckpt=final_ckpt,
+                val_loader=val_loader,
+                device=device,
+                writer=writer,
+                log_to_wandb=log_to_wandb
+            )
 
             if writer:
                 writer.close()  # Close TensorBoard writer

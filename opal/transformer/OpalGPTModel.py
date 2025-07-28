@@ -23,7 +23,7 @@ class OpalGPT(nn.Module):
         # Create a sequence of transformer blocks
         # Each block consists of multi-head attention and feed-forward layers
         self.transformers_block = nn.Sequential(
-        *[OpalTransformerBlock(cfg)
+            *[OpalTransformerBlock(cfg)
             for _ in range(cfg["n_layers"])]
         )
 
