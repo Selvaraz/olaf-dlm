@@ -27,6 +27,10 @@ def download_books(save_dir="./gutenberg_books"):
         filename = os.path.join(save_dir, f"book_{book_id}.txt")
 
         try:
+            # If the file already exist do not attempt to download
+            if os.path.exists(filename):
+                print(f"Skipping {book_id} as file already exists: {filename}")
+                continue
             response = requests.get(url, timeout=30)
             response.raise_for_status()
             with open(filename, "w", encoding="utf-8") as f:

@@ -89,7 +89,7 @@ Example usage:
     parser.add_argument(
         "--vocab_size", 
         type=int, 
-        default=4000,
+        default=8000,
         help="Size of the vocabulary to generate. Larger vocab sizes can capture more unique tokens but may increase memory usage."
     )
     parser.add_argument(

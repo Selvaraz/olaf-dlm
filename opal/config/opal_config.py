@@ -22,7 +22,7 @@ _GPT_CONFIG_OPAL_TEMP = {
     "transformer_drop_rate": 0.1,
     "attention_drop_rate": 0.1,
     "qkv_bias": False,
-    "num_epoch": 50,
+    "num_epoch": 500,
     "learning_rate": 4e-4,
     "weight_decay": 0.2
 }

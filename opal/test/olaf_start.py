@@ -20,6 +20,11 @@ torch.manual_seed(123)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def model_pretrain_test(start_fresh=False):
+    VOCAB_SIZE = sp.get_piece_size()
+
+    if (VOCAB_SIZE != OPAL_MODEL_CONFIG["vocab_size"]):
+        raise ValueError("Vocabulary size mismatch between tokenizer and model")
+
     opalInstance.train_and_save_model(
         model_class=OpalGPT,
         config=OPAL_MODEL_CONFIG,

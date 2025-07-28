@@ -824,7 +824,7 @@ class Opal:
             weight_decay=0.1,
             eval_freq=5,
             eval_iter=5,
-            start_context="how are you",
+            start_context="Every day ",
             is_finetune=False,
             log_to_tensorboard=True,   # Enable TensorBoard logging
             log_to_wandb=False,        # Enable W&B logging
