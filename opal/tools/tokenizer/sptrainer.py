@@ -87,7 +87,9 @@ def train_tokenizer(
         "<SICON>",
         "<IPC>",
         "<DATABASE>",
-        "<SUMMARY>"
+        "<SUMMARY>",
+        "u_int8", 
+        "uses_table_instance",
         
     ],
 ):

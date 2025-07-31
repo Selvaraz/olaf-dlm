@@ -9,7 +9,7 @@ from ..config.opal_config import OPAL_MODEL_CONFIG
 import torch
 import time
 import multiprocessing
-
+import shutil
 
 # Load SentencePiece tokenizer
 sp = spm.SentencePieceProcessor()
@@ -52,6 +52,8 @@ if __name__ == "__main__":
 
     if args.start_fresh:
         start_fresh = True
+        # Delete all files in the checkpoint directory
+        shutil.rmtree(OpalConstants.CHECKPOINT_DIR)
         print("-- Starting training from scratch")  
     else:
         start_fresh = False

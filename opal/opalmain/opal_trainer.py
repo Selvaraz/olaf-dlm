@@ -15,7 +15,7 @@ from ..dataloader.OpalDataSet import OpalDataset
 from torch.utils.data import Dataset, DataLoader
 from ..utils.opal_constants import OpalConstants
 from ..export.export_onnx import export_and_quantize_model
-
+from opal.config.opal_config import TRAINING_CONFIG
 import sentencepiece as spm
 from tqdm import tqdm
 from ..export.opal_evaluator import evaluate_pytorch, evaluate_onnx
@@ -59,8 +59,7 @@ class Opal:
         Returns:
             DataLoader: PyTorch DataLoader optimized for your CPU.
         """
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = TRAINING_CONFIG["device"]
 
         if self.tokenizer is None:
             raise ValueError("Tokenizer must be provided when creating Opal instance.")
@@ -105,7 +104,7 @@ class Opal:
     def createOpalDataLoader_v0(
         self,
         txt: str,
-        batch_size: int = 4,
+        batch_size: int = None, 
         max_length: int = 1280,
         stride: int = 256,
         shuffle: bool = True,
@@ -117,8 +116,7 @@ class Opal:
         Creates a DataLoader for the OpalDataset using the preloaded SentencePiece tokenizer.
         """
 
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = TRAINING_CONFIG["device"]
 
         if self.tokenizer is None:
             raise ValueError("Tokenizer not initialized. Please pass a SentencePieceProcessor to the Opal constructor.")
@@ -332,6 +330,8 @@ class Opal:
         best_val_loss = float("inf")
         epochs_no_improve = 0
         early_stopping_patience = self.config["early_stopping_patience"]
+        device = TRAINING_CONFIG["device"]
+        scaler = torch.cuda.amp.GradScaler() if TRAINING_CONFIG["mixed_precision"] else None
 
         # Main training loop
         for epoch in range(num_epochs):
@@ -362,30 +362,37 @@ class Opal:
             for batch_idx, (input_ids, targets) in enumerate(pbar):
                 #for input_batch, target_batch in train_loader:
                 # Reset loss gradients from previous batch iteration, so we start fresh
-                optimizer.zero_grad()  
+                optimizer.zero_grad(set_to_none=True)  
 
                 # Move input and target tensors to the specified device
                 input_ids, targets = input_ids.to(device), targets.to(device)
 
                 loss = self.calc_loss_batch(input_ids, targets, model, device)
 
-                # Backpropagate the loss
-                loss.backward()  
+                # Backpropagation with or without mixed precision
+                if TRAINING_CONFIG["mixed_precision"]:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
 
                 # Calculate gradient norm before clipping
                 total_norm = 0.0
+
                 for p in model.parameters():
                     if p.grad is not None:
                         param_norm = p.grad.data.norm(2)
                         total_norm += param_norm.item() ** 2
                 total_norm = total_norm ** 0.5
 
-                # clip gradients to prevent exploding gradients, this is optional
-                # But it is recommended to use it.
+                # Clip gradients to prevent exploding gradients
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-                # Update model weights using loss gradients
-                optimizer.step()  
+                # Optimizer step
+                if TRAINING_CONFIG["mixed_precision"]:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
 
                 # Update learning rate
                 if scheduler:
@@ -516,10 +523,25 @@ class Opal:
         return torch.nn.Parameter(torch.tensor(right))
     
     def calc_loss_batch(self, input_batch, target_batch, model, device):
+        #Overfide the device
+        device = TRAINING_CONFIG["device"]
+        # Pretrain: move tensors to the selected device
         input_batch, target_batch = input_batch.to(device), target_batch.to(device)
-        logits = model(input_batch  )
-        loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1), target_batch.flatten())
+
+        # Pretrain: explicitly create a CrossEntropyLoss function
+        loss_fn = torch.nn.CrossEntropyLoss()
+
+        if TRAINING_CONFIG["mixed_precision"]:
+            # Pretrain: use AMP autocast for mixed precision training on GPU
+            with torch.cuda.amp.autocast():
+                logits = model(input_batch)
+                loss = loss_fn(logits.view(-1, logits.size(-1)), target_batch.view(-1))
+        else:
+            logits = model(input_batch)
+            loss = loss_fn(logits.view(-1, logits.size(-1)), target_batch.view(-1))
+
         return loss
+
 
     def calc_loss_loader(self,data_loader, model, device, num_batches=None):
         """
@@ -636,7 +658,12 @@ class Opal:
         symlink_path = os.path.join(OpalConstants.CHECKPOINT_DIR, "checkpoint-latest.pt")
 
         if os.path.exists(symlink_path):
-            os.remove(symlink_path)
+            if os.path.islink(symlink_path) or os.path.isfile(symlink_path):
+                print(f"Removing existing symlink or file at {symlink_path}")
+                os.remove(symlink_path)
+            elif os.path.isdir(symlink_path):
+                print(f"Removing existing directory at {symlink_path}")
+                shutil.rmtree(symlink_path)
         os.symlink(checkpoint_path, symlink_path)
         print(f"Latest checkpoint symlink created at {symlink_path}")
 
@@ -931,7 +958,7 @@ class Opal:
                 print("✅ Successfully loaded model checkpoint!")
             except Exception as e:
                 print(f"⚠️ No checkpoint found. Training from scratch: {e}")
-                model = model_class(config).to(device)
+                model = model_class(config).to(TRAINING_CONFIG["device"])
                 optimizer_state_dict, scheduler_state_dict = None, None
                 train_losses, val_losses, epoch = [], [], 0
                 traceback.print_exc()
