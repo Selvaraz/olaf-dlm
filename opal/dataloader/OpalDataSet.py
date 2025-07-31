@@ -9,7 +9,7 @@ class OpalDataset(Dataset):
         tokenizer=None,
         max_length: int = 1280,
         stride: int = 256,
-        device: str = "cpu"
+        device: str = None
     ):
         """
         Args:
@@ -19,6 +19,9 @@ class OpalDataset(Dataset):
             stride: Overlap between consecutive chunks
             device: Device to move tensors to ('cpu' or 'cuda')
         """
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.stride = stride

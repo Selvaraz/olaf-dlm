@@ -7,7 +7,7 @@ def export_and_quantize_model(
     checkpoint_path: str,
     onnx_output_path: str,
     quantized_output_path: str,
-    device: str = "cpu"
+    device: str = None
 ):
     """
     Loads a trained checkpoint, exports it to ONNX, and creates a quantized ONNX model.
@@ -16,11 +16,15 @@ def export_and_quantize_model(
         checkpoint_path (str): Path to the PyTorch checkpoint (.pt file)
         onnx_output_path (str): Path to save the exported ONNX model
         quantized_output_path (str): Path to save the quantized ONNX model
-        device (str): "cpu" or "cuda"
+        device (str): 
 
     Returns:
         (str, str): Paths of exported ONNX and quantized models
     """
+
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
     # 1. Load model and weights
     print(f"Loading model from {checkpoint_path}...")
     model = OpalGPT(config).to(device)

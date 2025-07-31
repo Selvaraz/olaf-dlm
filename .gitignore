@@ -37,3 +37,6 @@ build/
 
 # Disable checkpoint dir
 checkpoints/
+
+# Disable specific things
+secure_do_not_commit/

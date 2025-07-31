@@ -41,7 +41,7 @@ class Opal:
         shuffle: bool = True,
         drop_last: bool = True,
         num_workers: int = None,
-        device: str = "cpu"
+        device: str = None
     ):
         """
         Creates a DataLoader for the OpalDataset using optimal settings based on CPU cores.
@@ -59,6 +59,8 @@ class Opal:
         Returns:
             DataLoader: PyTorch DataLoader optimized for your CPU.
         """
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
 
         if self.tokenizer is None:
             raise ValueError("Tokenizer must be provided when creating Opal instance.")
@@ -109,11 +111,14 @@ class Opal:
         shuffle: bool = True,
         drop_last: bool = True,
         num_workers: int = 0,
-        device: str = "cpu"
+        device: str = None
     ):
         """
         Creates a DataLoader for the OpalDataset using the preloaded SentencePiece tokenizer.
         """
+
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
 
         if self.tokenizer is None:
             raise ValueError("Tokenizer not initialized. Please pass a SentencePieceProcessor to the Opal constructor.")
@@ -154,7 +159,10 @@ class Opal:
         if self.check_new_tokens(text) and not self.start_fresh:
             print(f"🚨🚨🚨 New tokens found in text. Pretokenizing corpus...")
             raise ValueError("New tokens found in text. Please start training from scratch with start_fresh=True")
-            
+        
+        # If the directory to the oupout file is not found, create it
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
         token_ids = torch.tensor(sp.encode(text, out_type=int), dtype=torch.long)
         torch.save(token_ids, output_file)
 
@@ -321,6 +329,10 @@ class Opal:
         train_losses, val_losses, track_tokens_seen = [], [], []
         tokens_seen, global_step = 0, -1
 
+        best_val_loss = float("inf")
+        epochs_no_improve = 0
+        early_stopping_patience = self.config["early_stopping_patience"]
+
         # Main training loop
         for epoch in range(num_epochs):
             model.train()  # Set model to training mode
@@ -391,6 +403,24 @@ class Opal:
                     track_tokens_seen.append(tokens_seen)
                     total_steps = len(train_loader) * num_epochs
 
+                    # ✅ Early Stopping Logic
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        epochs_no_improve = 0
+                        print(f"🔥 New best val_loss {val_loss:.3f}! Saving temporary checkpoint...")
+                        self.save_model_checkpoint(
+                            self.config, model, optimizer, scheduler,
+                            epoch, train_losses, val_losses,
+                            tokenizer_model=OpalConstants.TOKENIZER_MODEL_PATH
+                        )
+                    else:
+                        epochs_no_improve += 1
+                        print(f"⚠️ No improvement for {epochs_no_improve} evaluations")
+
+                    if epochs_no_improve >= early_stopping_patience:
+                        print(f"⛔ Early stopping triggered after {early_stopping_patience} evaluations!")
+                        return train_losses, val_losses, track_tokens_seen
+
                     #Calculate tokens/sec
                     elapsed = time.time() - start_time
                     tokens_per_sec = tokens_seen / max(elapsed, 1e-6)
@@ -444,8 +474,11 @@ class Opal:
     def evaluate_model(self, model, train_loader, val_loader, device, eval_iter):
         model.eval()
         with torch.no_grad():
+            print(f"✅ Evaluating... eval_iter={eval_iter}, val_loader batches={len(val_loader)}")
             train_loss = self.calc_loss_loader(train_loader, model, device, num_batches=eval_iter)
             val_loss = self.calc_loss_loader(val_loader, model, device, num_batches=eval_iter)
+            if torch.isnan(torch.tensor(val_loss)):
+                print("⚠️ WARNING: val_loss became NaN!")   
         model.train()
         return train_loss, val_loss
 
@@ -504,8 +537,10 @@ class Opal:
         """
         total_loss = 0.
         if len(data_loader) == 0:
+            print("⚠️ Validation loader is EMPTY! Returning NaN")
             return float("nan")
-        elif num_batches is None:
+        
+        if num_batches is None:
             num_batches = len(data_loader)
         else:
             # Reduce the number of batches to match the total number of batches in the data loader
@@ -851,7 +886,6 @@ class Opal:
             Returns:
                 final_ckpt (str): Path to the final saved checkpoint.
             """
-
             start_time = time.time()
 
             # Unique timestamp for checkpoint. this is the directory
@@ -951,6 +985,7 @@ class Opal:
                 stride=config["context_length"],
                 drop_last=False,
                 shuffle=False,
+                device=device
             )
 
             # ----------------------------------------

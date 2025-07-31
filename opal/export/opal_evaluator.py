@@ -32,10 +32,13 @@ def evaluate_pytorch(checkpoint_path, dataset_loader, device="cpu"):
     return avg_loss, perplexity
 
 
-def evaluate_onnx(onnx_path, dataset_loader, device="cpu"):
+def evaluate_onnx(onnx_path, dataset_loader, device=None):
     """
     Evaluate a quantized ONNX model on a dataset and compute loss & perplexity.
     """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    
     session = ort.InferenceSession(
         onnx_path,
         providers=["CPUExecutionProvider"] if device == "cpu" else ["CUDAExecutionProvider"]
