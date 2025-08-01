@@ -17,7 +17,8 @@ _GPT_CONFIG_OPAL_CPU = {
     "num_epoch": 20,
     "learning_rate": 3e-4,
     "weight_decay": 0.2,
-    "early_stopping_patience": 10
+    "early_stopping_patience": 10,
+    "persistent_workers" : False
 }
 
 _GPT_CONFIG_OPAL_GPU = {

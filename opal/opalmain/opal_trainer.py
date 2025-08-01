@@ -39,7 +39,7 @@ class Opal:
         stride: int = 256,
         shuffle: bool = True,
         drop_last: bool = True,
-        num_workers: int = None,
+        num_workers: int = 0,
         device: str = None
     ):
         """
@@ -96,8 +96,9 @@ class Opal:
             shuffle=shuffle,
             drop_last=drop_last,
             num_workers=num_workers,
-            persistent_workers=True if num_workers > 0 else False,
-            prefetch_factor=4 if num_workers > 0 else 2
+            pin_memory=True, 
+            persistent_workers=self.config["persistent_workers"],
+            prefetch_factor=2
         )
     
     def createOpalDataLoader_v0(
