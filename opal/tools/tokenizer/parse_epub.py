@@ -3,12 +3,21 @@ from ebooklib import epub
 from bs4 import BeautifulSoup
 from pathlib import Path
 import shutil
+import re
+
+
+def normalize_text(element):
+    """
+    Extracts clean text from an HTML element, keeping inline tags (like <b> or <strong>) on the same line.
+    """
+    text = "".join(element.strings)  # Get all text nodes without adding extra newlines
+    text = re.sub(r"\s+", " ", text).strip()  # Normalize spaces/newlines
+    return text
 
 
 def parse_epub_file(epub_file: Path) -> str:
     """Extract structured content from a single EPUB file and return as <DOC> block."""
     book = epub.read_epub(str(epub_file))
-
     title = book.get_metadata("DC", "title")[0][0] if book.get_metadata("DC", "title") else epub_file.stem
 
     docs = []
@@ -18,7 +27,7 @@ def parse_epub_file(epub_file: Path) -> str:
             text_blocks = []
 
             for tag in soup.find_all(["h1", "h2", "h3", "p", "li", "pre", "code"]):
-                text = tag.get_text().strip()
+                text = normalize_text(tag)  # ✅ Use fixed text extractor
                 if not text:
                     continue
 
@@ -66,8 +75,8 @@ def process_epub_directory(input_dir: Path, output_dir: Path):
 
     print(f"\n🎉 Merged {len(merged_docs)} EPUB files → {merged_file}")
 
-    # Delete staging directory
-    shutil.rmtree(staging_dir)
+    # Uncomment if you want to delete staging directory
+    # shutil.rmtree(staging_dir)
     print(f"🗑️ Deleted staging directory: {staging_dir}")
 
 

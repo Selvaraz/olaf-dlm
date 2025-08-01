@@ -14,7 +14,7 @@ class OpalConstants:
     PRETRAIN_DATA_PATH = f"{DATA_DIR}/corpus_olaf.txt"
     #PRETRAIN_DATA_PATH = "/workspace/training/tokenizer_data/corpus_olaf_cpu_150k.txt"
     #PRETRAIN_DATA_PATH = f"/home/selvaraj/olaf-dlm/opal/opalmain/data/the-verdict.txt"
-    TOKENIZER_MODEL_PATH = f"{RUNTIME_ROOT_PATH}/olaf-dlm/opal/tokenizer/olaf_tokenizer.model"
+    TOKENIZER_MODEL_PATH = f"{RUNTIME_ROOT_PATH}/olaf-dlm/opal/tokenizer/olaf_tokenizer_073125.model"
     
 
     

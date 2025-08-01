@@ -6,7 +6,6 @@ import os
 import shutil
 import psutil
 import torch
-import tiktoken
 import git
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -64,11 +63,11 @@ class Opal:
         if self.tokenizer is None:
             raise ValueError("Tokenizer must be provided when creating Opal instance.")
 
-        # Determine number of workers based on CPU cores
-        available_cores = multiprocessing.cpu_count()
-        if num_workers is None:
-            # Use all available cores, but cap at 16 for very large servers to avoid overhead
-            num_workers = available_cores if available_cores <= 36 else 36
+        # # Determine number of workers based on CPU cores
+        # available_cores = multiprocessing.cpu_count()
+        # if num_workers is None:
+        #     # Use all available cores, but cap at 16 for very large servers to avoid overhead
+        #     num_workers = available_cores if available_cores <= 36 else 36
 
         # Dynamically set batch_size based on available cores if not provided
         if batch_size is None:

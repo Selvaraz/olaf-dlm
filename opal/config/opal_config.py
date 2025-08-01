@@ -14,8 +14,8 @@ _GPT_CONFIG_OPAL_CPU = {
     "transformer_drop_rate": 0.1,
     "attention_drop_rate": 0.1,
     "qkv_bias": False,
-    "num_epoch": 50,
-    "learning_rate": 4e-4,
+    "num_epoch": 20,
+    "learning_rate": 3e-4,
     "weight_decay": 0.2,
     "early_stopping_patience": 10
 }
