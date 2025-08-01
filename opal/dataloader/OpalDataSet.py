@@ -66,6 +66,6 @@ class OpalDataset(Dataset):
 
     def __getitem__(self, idx):
         return (
-            self.input_ids[idx].to(self.device),
-            self.target_ids[idx].to(self.device)
+            self.input_ids[idx],
+            self.target_ids[idx]
         )

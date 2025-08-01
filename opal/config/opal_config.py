@@ -41,7 +41,7 @@ _TRAINING_CONFIG_CPU = {
 _TRAINING_CONFIG_GPU = {
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "batch_size": 64,
-    "num_workers": 4,
+    "num_workers": 0,
     "mixed_precision": torch.cuda.is_available(),
     "gradient_accumulation_steps": 1
 }

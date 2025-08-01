@@ -101,42 +101,6 @@ class Opal:
             prefetch_factor= 4 if num_workers > 0 else None
         )
     
-    def createOpalDataLoader_v0(
-        self,
-        txt: str,
-        batch_size: int = None, 
-        max_length: int = 1280,
-        stride: int = 256,
-        shuffle: bool = True,
-        drop_last: bool = True,
-        num_workers: int = 0,
-        device: str = None
-    ):
-        """
-        Creates a DataLoader for the OpalDataset using the preloaded SentencePiece tokenizer.
-        """
-
-        device = TRAINING_CONFIG["device"]
-
-        if self.tokenizer is None:
-            raise ValueError("Tokenizer not initialized. Please pass a SentencePieceProcessor to the Opal constructor.")
-
-        dataset = OpalDataset(
-            txt=txt,
-            tokenizer=self.tokenizer,
-            max_length=max_length,
-            stride=stride,
-            device=device
-        )
-
-        return DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            drop_last=drop_last,
-            num_workers=num_workers
-        )
-
     def text_to_token_ids(self, text):
         encoded = self.tokenizer.encode(text)
         return torch.tensor(encoded).unsqueeze(0)
@@ -365,7 +329,8 @@ class Opal:
                 optimizer.zero_grad(set_to_none=True)  
 
                 # Move input and target tensors to the specified device
-                input_ids, targets = input_ids.to(device), targets.to(device)
+                input_ids = input_ids.to(device, non_blocking=True)
+                targets = targets.to(device, non_blocking=True)
 
                 loss = self.calc_loss_batch(input_ids, targets, model, device)
 
