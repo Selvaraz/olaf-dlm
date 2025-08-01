@@ -1004,7 +1004,7 @@ class Opal:
                 stride=config["context_length"],
                 drop_last=False,
                 shuffle=True,
-                prefetch_factor=4 if TRAINING_CONFIG["num_workers"] > 0 else None
+                num_workers=TRAINING_CONFIG["num_workers"],
             )
 
             val_loader = self.createOpalDataLoader(
@@ -1014,7 +1014,7 @@ class Opal:
                 drop_last=False,
                 shuffle=False,
                 device=device,
-                prefetch_factor=4 if TRAINING_CONFIG["num_workers"] > 0 else None
+                num_workers=TRAINING_CONFIG["num_workers"],
             )
 
             # ----------------------------------------
