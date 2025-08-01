@@ -17,7 +17,8 @@ python3 --version | tee -a $LOGFILE
 # ✅ Create virtual environment if not exists
 if [ ! -d "$ENV_NAME" ]; then
     echo "➡ Creating virtual environment: $ENV_NAME" | tee -a $LOGFILE
-    python3 -m venv $ENV_NAME
+    #python3 -m venv $ENV_NAME
+    apt install python3.12-venv
 else
     echo "✅ Virtual environment $ENV_NAME already exists" | tee -a $LOGFILE
 fi
