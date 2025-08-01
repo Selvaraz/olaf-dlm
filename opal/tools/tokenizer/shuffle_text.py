@@ -1,6 +1,6 @@
 import random
 
-with open("/worspace/dataset/corpus_olaf_orig.txt") as f:
+with open("/workspace/dataset/corpus_olaf_orig.txt") as f:
     blocks = f.read().split("\n\n")  # paragraph split
 
 random.shuffle(blocks)

@@ -70,13 +70,13 @@ class Opal:
         #     num_workers = available_cores if available_cores <= 36 else 36
 
         # Dynamically set batch_size based on available cores if not provided
-        if batch_size is None:
-            if available_cores >= 32:
-                batch_size = 8
-            elif available_cores >= 16:
-                batch_size = 6
-            else:
-                batch_size = 4
+        # if batch_size is None:
+        #     if available_cores >= 32:
+        #         batch_size = 8
+        #     elif available_cores >= 16:
+        #         batch_size = 6
+        #     else:
+        #         batch_size = 4
 
         # Print out chosen parameters for transparency
         print(f"Creating DataLoader with {num_workers} workers, batch_size={batch_size}, prefetch_factor=4")
@@ -925,7 +925,7 @@ class Opal:
             torch.manual_seed(123)
 
             # Let PyTorch use all available CPU threads (important for CPU training).
-            torch.set_num_threads(min(36, multiprocessing.cpu_count()))
+            #torch.set_num_threads(min(36, multiprocessing.cpu_count()))
 
             # ----------------------------------------
             #   Setup Logging
