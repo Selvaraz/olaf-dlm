@@ -98,7 +98,7 @@ class Opal:
             num_workers=num_workers,
             pin_memory=True, 
             persistent_workers=self.config["persistent_workers"],
-            prefetch_factor=2
+            prefetch_factor= 4 if num_workers > 0 else None
         )
     
     def createOpalDataLoader_v0(
