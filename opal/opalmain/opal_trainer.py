@@ -618,19 +618,19 @@ class Opal:
         tokenizer_model_path = os.path.join(checkpoint_dir, "opal_tokenizer.model")
         shutil.copyfile(tokenizer_model, tokenizer_model_path)
 
-        print(f"Model checkpoint saved to {checkpoint_path}")
+        #print(f"Model checkpoint saved to {checkpoint_path}")
         # Create a symlink to the latest checkpoint
         symlink_path = os.path.join(OpalConstants.CHECKPOINT_DIR, "checkpoint-latest.pt")
 
         if os.path.exists(symlink_path):
             if os.path.islink(symlink_path) or os.path.isfile(symlink_path):
-                print(f"Removing existing symlink or file at {symlink_path}")
+                #print(f"Removing existing symlink or file at {symlink_path}")
                 os.remove(symlink_path)
             elif os.path.isdir(symlink_path):
-                print(f"Removing existing directory at {symlink_path}")
+                #print(f"Removing existing directory at {symlink_path}")
                 shutil.rmtree(symlink_path)
         os.symlink(checkpoint_path, symlink_path)
-        print(f"Latest checkpoint symlink created at {symlink_path}")
+        #print(f"Latest checkpoint symlink created at {symlink_path}")
 
         return checkpoint_path
 
