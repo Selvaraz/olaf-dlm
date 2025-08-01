@@ -92,7 +92,7 @@ class Opal:
         # Use persistent_workers=True and prefetch_factor=4 to reduce worker startup overhead
         return DataLoader(
             dataset,
-            batch_size=batch_size,
+            batch_size=TRAINING_CONFIG["batch_size"],
             shuffle=shuffle,
             drop_last=drop_last,
             num_workers=num_workers,
