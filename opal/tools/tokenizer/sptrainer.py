@@ -118,6 +118,10 @@ def train_tokenizer(
         f"--vocab_size={vocab_size} "
         f"--character_coverage=1.0 "
         f"--model_type={model_type} "
+        f"--unk_id={3} "
+        f"--pad_id={0} "
+        f"--bos_id={1} "
+        f"--eos_id={2} "
         f"--user_defined_symbols={','.join(user_defined_symbols)}"
     )
 

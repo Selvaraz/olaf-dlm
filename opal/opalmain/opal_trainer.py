@@ -11,6 +11,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from ..dataloader.OpalDataSet import OpalDataset
+from ..dataloader.OpalFineTuneDataSet import OpalFinetuneDataset
 from torch.utils.data import Dataset, DataLoader
 from ..utils.opal_constants import OpalConstants
 from ..export.export_onnx import export_and_quantize_model
@@ -18,6 +19,7 @@ from opal.config.opal_config import TRAINING_CONFIG
 import sentencepiece as spm
 from tqdm import tqdm
 from ..export.opal_evaluator import evaluate_pytorch, evaluate_onnx
+from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR
 
 #For TensorBoard logging
 from torch.utils.tensorboard import SummaryWriter
@@ -26,11 +28,103 @@ import wandb
 
 
 class Opal:
-    def __init__(self, config, tokenizer=None, start_fresh=False):
+    def __init__(self, config, tokenizer=None, 
+                start_fresh=False, is_finetune=False,
+                finetune_data_path=None):
         self.config = config
         self.tokenizer = tokenizer
         self.start_fresh = start_fresh
+        self.is_finetune = is_finetune
+        self.finetune_data_path = finetune_data_path
     
+    def collate_finetune(self, batch, pad_id=0):
+        """Return a tuple (input_ids, labels) to match the model's forward(input, labels) signature."""
+        max_len = max(len(x[0]) for x in batch)
+        input_ids, labels = [], []
+
+        for input_ids_tensor, labels_tensor in batch:
+            pad_len = max_len - len(input_ids_tensor)
+
+            padded_inputs = torch.cat(
+                [input_ids_tensor, torch.full((pad_len,), pad_id, dtype=torch.long)]
+            )
+            padded_labels = torch.cat(
+                [labels_tensor, torch.full((pad_len,), -100, dtype=torch.long)]
+            )
+
+            input_ids.append(padded_inputs)
+            labels.append(padded_labels)
+
+        return torch.stack(input_ids), torch.stack(labels)
+
+    def createOpalFinetuneDataLoader(
+        self,
+        data_jsonl: str,              # path to JSONL file for fine-tuning
+        batch_size: int = None,
+        max_length: int = 1024,
+        shuffle: bool = True,
+        drop_last: bool = True,
+        num_workers: int = 0,
+        device: str = None
+    ):
+        """
+        Creates a DataLoader for fine-tuning using OpalFinetuneDataset.
+
+        Args:
+            data_jsonl (str): Path to JSONL fine-tuning dataset file.
+            batch_size (int, optional): If None, uses TRAINING_CONFIG["batch_size"].
+            max_length (int): Maximum token sequence length per sample.
+            shuffle (bool): Whether to shuffle dataset each epoch.
+            drop_last (bool): Drop last batch if incomplete.
+            num_workers (int): Number of workers for DataLoader (0 for CUDA to avoid fork issue).
+            device (str): Device to put data on ('cpu' or 'cuda').
+
+        Returns:
+            DataLoader: PyTorch DataLoader for fine-tuning.
+        """
+        device = device or TRAINING_CONFIG.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+
+        if self.tokenizer is None:
+            raise ValueError("Tokenizer must be provided when creating Opal instance.")
+        
+        # with open(data_jsonl, "r", encoding="utf-8") as f:
+        #     data = [json.loads(line.strip()) for line in f]
+        data = []
+        with open(data_jsonl, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    data.append(json.loads(line.strip()))
+                except json.JSONDecodeError:
+                    print(f"⚠ Skipping malformed JSONL line: {line[:50]}...")  # Review-1: Added malformed line handling
+
+        print(f"📄 Loaded {len(data)} fine-tuning samples from {data_jsonl}")
+
+        # Create dataset
+        dataset = OpalFinetuneDataset(
+            data=data,
+            tokenizer=self.tokenizer,
+        )
+
+        # Get pad token ID
+        pad_id = self.tokenizer.pad_id() if self.tokenizer.pad_id() >= 0 else self.tokenizer.unk_id()
+
+        # Set batch size
+        if batch_size is None:
+            batch_size = TRAINING_CONFIG.get("batch_size", 4)
+
+        print(f"✅ Creating Fine-tune DataLoader → batch_size={batch_size}, shuffle={shuffle}, workers={num_workers}")
+
+        # Create DataLoader with collate function for dynamic padding
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=drop_last,
+            num_workers=num_workers,
+            pin_memory=True,
+            collate_fn=lambda batch: self.collate_finetune(batch, pad_id=pad_id)
+        )
+
     def createOpalDataLoader(
         self,
         txt: str,
@@ -62,21 +156,6 @@ class Opal:
 
         if self.tokenizer is None:
             raise ValueError("Tokenizer must be provided when creating Opal instance.")
-
-        # # Determine number of workers based on CPU cores
-        # available_cores = multiprocessing.cpu_count()
-        # if num_workers is None:
-        #     # Use all available cores, but cap at 16 for very large servers to avoid overhead
-        #     num_workers = available_cores if available_cores <= 36 else 36
-
-        # Dynamically set batch_size based on available cores if not provided
-        # if batch_size is None:
-        #     if available_cores >= 32:
-        #         batch_size = 8
-        #     elif available_cores >= 16:
-        #         batch_size = 6
-        #     else:
-        #         batch_size = 4
 
         # Print out chosen parameters for transparency
         print(f"Creating DataLoader with {num_workers} workers, batch_size={batch_size}, prefetch_factor=4")
@@ -181,8 +260,12 @@ class Opal:
 
             # Perform inference to get logits for the next token
             with torch.no_grad():
-                logits = model(idx_cond)
-            logits = logits[:, -1, :]  # Take logits of the last token position
+                model_output = model(idx_cond)
+            
+            logits = model_output["logits"] if isinstance(model_output, dict) else model_output
+            logits = logits[:, -1, :]  # ✅ Take only last token logits
+
+            #logits = model_output["logits"][0, -1, :]  # Take logits of the last token position
 
             #  Apply temperature scaling (makes probabilities sharper or smoother)
             if temperature > 0.0:
@@ -251,8 +334,8 @@ class Opal:
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -context_size:]
             with torch.no_grad():
-                logits = model(idx_cond)
-            logits = logits[:, -1, :]
+                model_output = model(idx_cond)
+            logits = model_output["logits"][0, -1, :]
 
             #  Filter logits with top_k sampling
             if top_k is not None:
@@ -453,7 +536,7 @@ class Opal:
     def evaluate_model(self, model, train_loader, val_loader, device, eval_iter):
         model.eval()
         with torch.no_grad():
-            print(f"✅ Evaluating... eval_iter={eval_iter}, val_loader batches={len(val_loader)}")
+            print(f"   [ ✅ Evaluating... eval_iter={eval_iter}, val_loader batches={len(val_loader)} ]")
             train_loss = self.calc_loss_loader(train_loader, model, device, num_batches=eval_iter)
             val_loss = self.calc_loss_loader(val_loader, model, device, num_batches=eval_iter)
             if torch.isnan(torch.tensor(val_loss)):
@@ -499,22 +582,34 @@ class Opal:
         return torch.nn.Parameter(torch.tensor(right))
     
     def calc_loss_batch(self, input_batch, target_batch, model, device):
-        #Overfide the device
+        """Calculate loss for both pretraining (input, target) and fine-tuning (input+labels)."""
         device = TRAINING_CONFIG["device"]
-        # Pretrain: move tensors to the selected device
-        input_batch, target_batch = input_batch.to(device), target_batch.to(device)
 
-        # Pretrain: explicitly create a CrossEntropyLoss function
-        loss_fn = torch.nn.CrossEntropyLoss()
+        # Move to device
+        if isinstance(input_batch, torch.Tensor):
+            input_batch = input_batch.to(device)
+        if isinstance(target_batch, torch.Tensor):
+            target_batch = target_batch.to(device)
 
-        if TRAINING_CONFIG["mixed_precision"]:
-            # Pretrain: use AMP autocast for mixed precision training on GPU
-            with torch.cuda.amp.autocast():
-                logits = model(input_batch)
-                loss = loss_fn(logits.view(-1, logits.size(-1)), target_batch.view(-1))
+        if self.is_finetune:
+            # Fine-tuning: model returns dict with loss when labels are passed
+            if TRAINING_CONFIG["mixed_precision"]:
+                with torch.cuda.amp.autocast():
+                    output = model(input_batch, target_batch)
+            else:   
+                output = model(input_batch, target_batch)
+
+            loss = output["loss"] if isinstance(output, dict) else output
         else:
-            logits = model(input_batch)
-            loss = loss_fn(logits.view(-1, logits.size(-1)), target_batch.view(-1))
+            # Pretraining: manually compute loss using CrossEntropy
+            loss_fn = torch.nn.CrossEntropyLoss()
+            if TRAINING_CONFIG["mixed_precision"]:
+                with torch.cuda.amp.autocast():
+                    logits = model(input_batch)["logits"] if isinstance(model(input_batch), dict) else model(input_batch)
+                    loss = loss_fn(logits.view(-1, logits.size(-1)), target_batch.view(-1))
+            else:
+                logits = model(input_batch)["logits"] if isinstance(model(input_batch), dict) else model(input_batch)
+                loss = loss_fn(logits.view(-1, logits.size(-1)), target_batch.view(-1))
 
         return loss
 
@@ -564,7 +659,8 @@ class Opal:
             
             # Get the predictions
             with torch.no_grad():
-                logits = model(idx_cond)
+                model_output = model(idx_cond)
+                logits = model_output["logits"]
             
             # Focus only on the last time step
             # (batch, n_tokens, vocab_size) becomes (batch, vocab_size)
@@ -619,7 +715,11 @@ class Opal:
 
         # Create a directory with current date and save the model inside the path
         date_dir = datetime.now().strftime("%Y%m%d")
-        checkpoint_dir = os.path.join(OpalConstants.CHECKPOINT_DIR, date_dir, timestamp)
+        if not self.is_finetune:
+            checkpoint_dir = os.path.join(OpalConstants.CHECKPOINT_DIR, date_dir, timestamp)
+        else:
+            checkpoint_dir = os.path.join(OpalConstants.CHECKPOINT_DIR, "_finetune_", date_dir, timestamp)
+        
         os.makedirs(checkpoint_dir, exist_ok=True)
         checkpoint_path = os.path.join(checkpoint_dir, f"opal_gpt_checkpoint_{timestamp}.pt")
         
@@ -631,7 +731,10 @@ class Opal:
 
         #print(f"Model checkpoint saved to {checkpoint_path}")
         # Create a symlink to the latest checkpoint
-        symlink_path = os.path.join(OpalConstants.CHECKPOINT_DIR, "checkpoint-latest.pt")
+        if not self.is_finetune:
+            symlink_path = os.path.join(OpalConstants.CHECKPOINT_DIR, "checkpoint-latest.pt")
+        else:
+            symlink_path = os.path.join(OpalConstants.CHECKPOINT_DIR, "finetune-latest.pt")
 
         if os.path.exists(symlink_path):
             if os.path.islink(symlink_path) or os.path.isfile(symlink_path):
@@ -646,7 +749,7 @@ class Opal:
         return checkpoint_path
 
 
-    def load_model_checkpoint(self, model_class, checkpoint_path, device="cpu", start_fresh=False):
+    def load_model_checkpoint(self, model_class, checkpoint_path, device="cpu", start_fresh=False, create_new=True):
         """
         Loads a trained model checkpoint and restores model, optimizer, and training state.
 
@@ -668,7 +771,15 @@ class Opal:
         optimizer_state_dict= None
         scheduler_state_dict = None
         config = self.config
-        
+
+        if self.is_finetune and not os.path.isfile(os.path.realpath(checkpoint_path)):
+            print("*** Checkpoint not found for finetuning. Please provide a valid checkpoint path")
+            exit(1)
+            
+
+        if ((create_new == False) and (not os.path.isfile(os.path.realpath(checkpoint_path)))):
+            raise ValueError("Checkpoint not found and create_new is False")
+            
         if (not os.path.isfile(os.path.realpath(checkpoint_path))) or start_fresh:
             print(f"⚠️ Checkpoint {checkpoint_path} not found (or) start_fresh is requested. Creating new model.")
             model = model_class(self.config).to(device)
@@ -682,7 +793,7 @@ class Opal:
             optimizer_state_dict = checkpoint.get("optimizer_state_dict", None)
             scheduler_state_dict = checkpoint.get("scheduler_state_dict", None)
             model.to(device)
-        print(checkpoint)
+        #print(checkpoint)
         return (
             model,
             optimizer_state_dict  if optimizer_state_dict else None,
@@ -848,230 +959,215 @@ class Opal:
     # to train the model from scratch or continue training
     # or fine-tune the model on a new dataset
     def train_and_save_model(
-            self,
-            model_class,
-            config,
-            device,
-            tokenizer,
-            corpus_text,
-            checkpoint_path,
-            num_epochs=10,
-            batch_size=8,
-            train_ratio=0.9,
-            lr=4e-4,
-            weight_decay=0.1,
-            eval_freq=5,
-            eval_iter=5,
-            start_context="Cisco discovery ",
-            is_finetune=False,
-            log_to_tensorboard=True,   # Enable TensorBoard logging
-            log_to_wandb=False,        # Enable W&B logging
-            wandb_project="opal-training",  # W&B project name
-            start_fresh=False
-        ):
-            """
-            Reusable utility to train, continue pretraining, or fine-tune a model.
+        self,
+        model_class,
+        config,
+        device,
+        tokenizer,
+        checkpoint_path,
+        corpus_text = "",
+        num_epochs=10,
+        batch_size=8,
+        train_ratio=0.9,
+        lr=4e-4,
+        weight_decay=0.1,
+        eval_freq=5,
+        eval_iter=5,
+        start_context="Cisco discovery ",
+        log_to_tensorboard=True,
+        log_to_wandb=False,
+        wandb_project="opal-training",
+        start_fresh=False
+    ):
+        """
+        Train, continue pretraining, or fine-tune a model.
+        Includes:
+        ✅ Fine-tuning support (JSONL loader)
+        ✅ Warmup + CosineAnnealingLR scheduler
+        ✅ Gradient accumulation + clipping
+        """
 
-            - Can be used for:
-                1. **Pretraining from scratch**
-                2. **Continuing pretraining with new corpus (domain adaptation)**
-                3. **Fine-tuning on instruction datasets**
+        start_time = time.time()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-            This function handles:
-            -- Loading model & optimizer/scheduler states if checkpoint exists
-            -- Creating training/validation splits and DataLoaders
-            -- Computing total steps and creating CosineAnnealingLR scheduler
-            -- Training for specified epochs
-            -- Saving model checkpoints with full training state (model+optimizer+scheduler)
-            -- Plotting loss curves after training
-            -- Logs training/validation loss to TensorBoard or Weights & Biases
+        torch.manual_seed(123)
 
-            Returns:
-                final_ckpt (str): Path to the final saved checkpoint.
-            """
-            start_time = time.time()
+        # Retrieve class-level flags for fine-tuning  #Finetune-Optional
+        is_finetune = getattr(self, "is_finetune", False)
+        finetune_data_path = getattr(self, "finetune_data_path", None)
 
-            # Unique timestamp for checkpoint. this is the directory
-            # where the checkpoint is saved and the related plots,
-            # tensorboard logs saved.
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # ----------------------------------------
+        # Logging Setup
+        # ----------------------------------------
+        writer = None
+        if log_to_tensorboard:
+            date_dir = datetime.now().strftime("%Y%m%d")
+            run_dir = os.path.join(OpalConstants.TENSORBOARD_RUN_DIR, date_dir, timestamp)
+            os.makedirs(run_dir, exist_ok=True)
+            writer = SummaryWriter(log_dir=run_dir)
+            latest_symlink = os.path.join(OpalConstants.TENSORBOARD_RUN_DIR, "tensorboard_latest")
+            if os.path.islink(latest_symlink):
+                os.remove(latest_symlink)
+            os.symlink(run_dir, latest_symlink)
+            print(f"-- TensorBoard logging enabled at {run_dir}")
 
-            # ----------------------------------------
-            #  Set random seed for reproducibility
-            # ----------------------------------------
-            torch.manual_seed(123)
+        if log_to_wandb:
+            wandb.init(project=wandb_project, config=config)
+            wandb.watch(model_class, log="all")
 
-            # Let PyTorch use all available CPU threads (important for CPU training).
-            #torch.set_num_threads(min(36, multiprocessing.cpu_count()))
+        # ----------------------------------------
+        # Load Checkpoint if available
+        # ----------------------------------------
+        try:
+            print(f"Attempting to load model checkpoint from {checkpoint_path}...")
+            model, optimizer_state_dict, scheduler_state_dict, epoch, train_losses, val_losses, _ = \
+                self.load_model_checkpoint(model_class, checkpoint_path, device, start_fresh)
+            print("✅ Successfully loaded model checkpoint!")
+        except Exception as e:
+            print(f"⚠️ No checkpoint found. Training from scratch: {e}")
+            model = model_class(config).to(device)
+            optimizer_state_dict, scheduler_state_dict = None, None
+            train_losses, val_losses, epoch = [], [], 0
 
-            # ----------------------------------------
-            #   Setup Logging
-            # ----------------------------------------
-            writer = None
-            if log_to_tensorboard:
-                date_dir = datetime.now().strftime("%Y%m%d")
-                run_dir = os.path.join(OpalConstants.TENSORBOARD_RUN_DIR, date_dir, timestamp)
-                os.makedirs(run_dir, exist_ok=True)
-                writer = SummaryWriter(log_dir=run_dir)
-                latest_symlink = os.path.join(OpalConstants.TENSORBOARD_RUN_DIR, "tensorboard_latest")
-                if os.path.islink(latest_symlink):
-                    os.remove(latest_symlink)
-                os.symlink(run_dir, latest_symlink)
-                print(f"-- TensorBoard logging enabled at {run_dir}")
+        # ----------------------------------------
+        # Optimizer
+        # ----------------------------------------
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        if optimizer_state_dict:
+            optimizer.load_state_dict(optimizer_state_dict)
 
-            if log_to_wandb:
-                wandb.init(project=wandb_project, config=config)  #  Initialize W&B
-                wandb.watch(model_class, log="all")
-                print("-- Weights & Biases logging enabled")
+        # ----------------------------------------
+        # Data Loading
+        # ----------------------------------------
+        if is_finetune:
+            if not finetune_data_path:
+                raise ValueError("finetune_data_path must be provided for fine-tuning")
 
-            # ----------------------------------------
-            #  Step 1: Try loading existing checkpoint
-            # ----------------------------------------
-            try:
-                print(f"Attempting to load model checkpoint from {checkpoint_path}...")
-                model, optimizer_state_dict, scheduler_state_dict, epoch, train_losses, val_losses, _ = \
-                    self.load_model_checkpoint(model_class, checkpoint_path, device, start_fresh)
-                print("✅ Successfully loaded model checkpoint!")
-            except Exception as e:
-                print(f"⚠️ No checkpoint found. Training from scratch: {e}")
-                model = model_class(config).to(TRAINING_CONFIG["device"])
-                optimizer_state_dict, scheduler_state_dict = None, None
-                train_losses, val_losses, epoch = [], [], 0
-                traceback.print_exc()
-
-
-            # ----------------------------------------
-            #  Step 2: Create optimizer
-            # ----------------------------------------
-            optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-
-            if optimizer_state_dict:
-                optimizer.load_state_dict(optimizer_state_dict)
-
-            # ----------------------------------------
-            #  Step 3: Load training data and split into train/validation sets
-            # ----------------------------------------
-            print("Loading training data...")
-
-            if isinstance(corpus_text, torch.Tensor):
-                total_length = len(corpus_text)
-            elif isinstance(corpus_text, str):
-                total_length = len(tokenizer.encode(corpus_text))
-            else:
-                raise ValueError("corpus_text must be either str or torch.Tensor")
-
-            split_idx = int(train_ratio * total_length)
-
-            if isinstance(corpus_text, torch.Tensor):
-                train_data, val_data = corpus_text[:split_idx], corpus_text[split_idx:]
-                total_tokens = len(corpus_text)
-            else:
-                train_data, val_data = corpus_text[:split_idx], corpus_text[split_idx:]
-                total_tokens = len(tokenizer.encode(corpus_text))
-
-            # ----------------------------------------
-            #  Step 4: Create DataLoaders for training and validation
-            # ----------------------------------------
-            print("Creating training and validation loaders...")
-
-            training_loader = self.createOpalDataLoader(
-                txt=train_data,
+            print(f"-- Fine-tuning with {finetune_data_path}")
+            training_loader = self.createOpalFinetuneDataLoader(
+                data_jsonl=finetune_data_path,
+                batch_size=batch_size,
                 max_length=config["context_length"],
-                stride=config["context_length"],
-                drop_last=False,
                 shuffle=True,
-                num_workers=TRAINING_CONFIG["num_workers"],
+                num_workers=TRAINING_CONFIG["num_workers"]
             )
-
-            val_loader = self.createOpalDataLoader(
-                txt=val_data,
+            print("✅ Created training DataLoader")
+            val_loader = self.createOpalFinetuneDataLoader(
+                data_jsonl=finetune_data_path,
+                batch_size=batch_size,
                 max_length=config["context_length"],
-                stride=config["context_length"],
-                drop_last=False,
                 shuffle=False,
-                device=device,
-                num_workers=TRAINING_CONFIG["num_workers"],
+                num_workers=TRAINING_CONFIG["num_workers"]
             )
+            print("✅ Created validation DataLoader")
+        else:
+            # Original pretraining corpus split
+            if isinstance(corpus_text, str):
+                total_tokens = len(tokenizer.encode(corpus_text))
+                split_idx = int(train_ratio * total_tokens)
+                train_data, val_data = corpus_text[:split_idx], corpus_text[split_idx:]
+            else:
+                total_length = len(corpus_text)
+                split_idx = int(train_ratio * total_length)
+                train_data, val_data = corpus_text[:split_idx], corpus_text[split_idx:]
 
-            # ----------------------------------------
-            #  Step 5: Calculate total training steps for scheduler
-            # ----------------------------------------
-            total_steps = num_epochs * len(training_loader)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+                training_loader = self.createOpalDataLoader(
+                    txt=train_data,
+                    max_length=config["context_length"],
+                    stride=config["context_length"],
+                    shuffle=True,
+                    num_workers=TRAINING_CONFIG["num_workers"],
+                )
+                val_loader = self.createOpalDataLoader(
+                    txt=val_data,
+                    max_length=config["context_length"],
+                    stride=config["context_length"],
+                    shuffle=False,
+                    num_workers=TRAINING_CONFIG["num_workers"],
+                )
 
-            if scheduler_state_dict:
-                scheduler.load_state_dict(scheduler_state_dict)
+        # ----------------------------------------
+        # Scheduler with Warmup + CosineAnnealingLR  #Finetune-Optional
+        # ----------------------------------------
+        total_steps = num_epochs * len(training_loader)
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=total_steps
+        )
 
-            # ----------------------------------------
-            #  Step 6: Begin training
-            # ----------------------------------------
-            print("^^ Start training the olaf-opal model ... ^^")
-            train_losses, val_losses, tokens_seen = self.train_model_simple(
-                model=model,
-                train_loader=training_loader,
-                val_loader=val_loader,
-                scheduler=scheduler,
-                tokenizer=tokenizer,
-                optimizer=optimizer,
-                device=device,
-                num_epochs=num_epochs,
-                eval_iter=eval_iter,
-                eval_freq=eval_freq,
-                start_context=start_context,
-                writer=writer,              #  Pass TensorBoard writer
-                log_to_wandb=log_to_wandb   #  Pass W&B flag
-            )
+        def lr_lambda(step):
+            if step < config.get("warmup_steps", 0):
+                return float(step) / float(max(1, config["warmup_steps"]))
+            return 1.0
 
-            # ----------------------------------------
-            #  Step 7: Save model checkpoint
-            # ----------------------------------------
-            final_ckpt = self.save_model_checkpoint(
-                config,
-                model,
-                optimizer,
-                scheduler,
-                epoch + num_epochs,
-                train_losses,
-                val_losses,
-                tokenizer_model=OpalConstants.TOKENIZER_MODEL_PATH,
-                timestamp=timestamp
-            )
+        print("✅ Created learning rate scheduler")
+        warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-            # Export the model to ONNX
-            # ----------------------------------------
-            onnx_path = checkpoint_path.replace(".pt", ".onnx")
-            quant_path = checkpoint_path.replace(".pt", "_quantized.onnx")
+        if scheduler_state_dict:
+            cosine_scheduler.load_state_dict(scheduler_state_dict)
 
-            export_and_quantize_model(
-                config,
-                final_ckpt,
-                onnx_path,
-                quant_path,
-                device="cuda" if torch.cuda.is_available() else "cpu"
-            )
+        # ----------------------------------------
+        # Training Loop
+        # ----------------------------------------
+        global_step = 0
+        model.train()
+        train_losses, val_losses, tokens_seen = [], [], []
 
-            # ----------------------------------------
-            #  Step 8: Plot training & validation loss curves
-            # ----------------------------------------
-            epochs_tensor = torch.linspace(epoch + 1, epoch + num_epochs, len(train_losses))
-            self.plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses, final_ckpt)
+        print("✅ Starting training loop ^^^^^^^^^^^^ ")
+        # for epoch_idx in range(num_epochs):
+        #     print(f"Epoch {epoch_idx + 1}/{num_epochs}")
+        #     for step, batch in enumerate(training_loader):
+        #         input_ids, labels = batch
+        #         model_output = model(input_ids, labels)
+        #         loss = model_output["loss"] / config.get("gradient_accumulation_steps", 1)
+        #         loss.backward()
 
-            # ----------------------------------------
-            # Step 9: Evaluate both models (PT & ONNX)
-            # ----------------------------------------
-            
-            results = self._evaluate_and_log_models(
-                final_ckpt=final_ckpt,
-                val_loader=val_loader,
-                device=device,
-                writer=writer,
-                log_to_wandb=log_to_wandb
-            )
+        #         if (step + 1) % config.get("gradient_accumulation_steps", 1) == 0:
+        #             torch.nn.utils.clip_grad_norm_(
+        #                 model.parameters(), config.get("max_grad_norm", 1.0)
+        #             )
+        #             optimizer.step()
+        #             optimizer.zero_grad()
 
-            if writer:
-                writer.close()  # Close TensorBoard writer
-            if log_to_wandb:
-                wandb.finish()  # Close W&B session
+        #             if global_step < config.get("warmup_steps", 0):
+        #                 warmup_scheduler.step()
+        #             else:
+        #                 cosine_scheduler.step()
 
-            print(f"-- Training complete! Final checkpoint saved at {final_ckpt}")
-            return final_ckpt
+        #             global_step += 1
+
+        #     # Validation step
+        #     if (epoch_idx + 1) % eval_freq == 0:
+        #         val_loss = self.evaluate_model(model, val_loader, device)
+        #         val_losses.append(val_loss)
+
+        print("✅ Starting training loop")
+        train_losses, val_losses, tokens_seen = self.train_model_simple(
+            model=model,
+            train_loader=training_loader,
+            val_loader=val_loader,
+            optimizer=optimizer,
+            scheduler=cosine_scheduler,
+            device=device,
+            num_epochs=num_epochs,
+            eval_freq=eval_freq,
+            eval_iter=eval_iter,
+            start_context=start_context,
+            tokenizer=tokenizer,
+            writer=writer,
+            log_to_wandb=log_to_wandb
+        )
+        # Save final checkpoint
+        print("✅ Saving final checkpoint")
+        final_ckpt = self.save_model_checkpoint(
+            config,
+            model,
+            optimizer,
+            cosine_scheduler,
+            epoch + num_epochs,
+            train_losses,
+            val_losses,
+            tokenizer_model=OpalConstants.TOKENIZER_MODEL_PATH,
+            timestamp=timestamp
+        )
+
+        return final_ckpt

@@ -37,6 +37,8 @@ class OpalGPT(nn.Module):
             cfg["emb_dim"], cfg["vocab_size"], bias=False
         )
 
+        self.cfg = cfg
+
         self.apply(self._init_weights)
 
     # Initialize the weights of the model, the reason for this 
@@ -51,7 +53,7 @@ class OpalGPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, input_token_ids):
+    def forward(self, input_token_ids, labels=None):
         """
         Compute the output of the GPT model given an input sequence.
 
@@ -59,6 +61,8 @@ class OpalGPT(nn.Module):
         ----------
         in_idx : torch.LongTensor
             Input sequence of shape (batch_size, sequence_length)
+        labels : torch.LongTensor
+            Labels of shape (batch_size, sequence_length)
 
         Returns
         -------
@@ -70,6 +74,10 @@ class OpalGPT(nn.Module):
         batch_size, seq_len = input_token_ids.shape
         
         # Get the token embeddings for the input token IDs
+        #print("Input token IDs shape:", input_token_ids.shape)
+        #print("Token embeddings shape:", self.cfg["vocab_size"], self.cfg["emb_dim"])
+        #print("Input token IDs min:", input_token_ids.min().item(), "max:", input_token_ids.max().item())
+
         tok_embeds = self.token_embeddings(input_token_ids)
         
         # Get the positional embeddings for the input token IDs
@@ -93,4 +101,10 @@ class OpalGPT(nn.Module):
         logits = self.out_head(x)
         
         # Return the logits
-        return logits
+        if labels is not None:
+            loss_fct = nn.CrossEntropyLoss()
+            #print("Configuration object:", self.cfg)
+            loss = loss_fct(logits.view(-1, self.cfg["vocab_size"]), labels.view(-1))
+            return {"logits": logits, "loss": loss}
+
+        return {"logits": logits}   
