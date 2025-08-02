@@ -36,7 +36,9 @@ def model_pretrain_test(start_fresh=False):
         log_to_tensorboard=True,
         lr=OPAL_MODEL_CONFIG["learning_rate"],
         weight_decay=OPAL_MODEL_CONFIG["weight_decay"],
-        start_fresh=start_fresh
+        start_fresh=start_fresh,
+        eval_iter=100,
+        eval_freq=500,
     )
 
 

@@ -292,7 +292,7 @@ class Opal:
         tokens_seen, global_step = 0, -1
 
         best_val_loss = float("inf")
-        epochs_no_improve = 0
+        epochs_no_improve = 0  # Track epochs without improvement
         early_stopping_patience = self.config["early_stopping_patience"]
         device = TRAINING_CONFIG["device"]
         scaler = torch.cuda.amp.GradScaler() if TRAINING_CONFIG["mixed_precision"] else None
@@ -304,6 +304,8 @@ class Opal:
             # Create a progress bar for the training data
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
             start_time = time.time()
+
+            epoch_best_val_loss = best_val_loss  # Track best val loss for this epoch
 
             # This loop iterates over the training data for the specified number of epochs.
             # Since the DataLoader is set to drop the last batch if it is not full, the number of
@@ -375,10 +377,9 @@ class Opal:
                     track_tokens_seen.append(tokens_seen)
                     total_steps = len(train_loader) * num_epochs
 
-                    # ✅ Early Stopping Logic
+                    # ✅ Early Stopping Logic (best val loss updated here)
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
-                        epochs_no_improve = 0
                         print(f"🔥 New best val_loss {val_loss:.3f}! Saving temporary checkpoint...")
                         self.save_model_checkpoint(
                             self.config, model, optimizer, scheduler,
@@ -386,12 +387,7 @@ class Opal:
                             tokenizer_model=OpalConstants.TOKENIZER_MODEL_PATH
                         )
                     else:
-                        epochs_no_improve += 1
-                        print(f"⚠️ No improvement for {epochs_no_improve} evaluations")
-
-                    if epochs_no_improve >= early_stopping_patience:
-                        print(f"⛔ Early stopping triggered after {early_stopping_patience} evaluations!")
-                        return train_losses, val_losses, track_tokens_seen
+                        print(f"⚠️ No improvement at this evaluation")
 
                     #Calculate tokens/sec
                     elapsed = time.time() - start_time
@@ -430,6 +426,17 @@ class Opal:
                             "gpu_memory_mb": gpu_mem_mb,
                             "step": global_step
                         })
+
+            # ✅ After each epoch, check if val_loss improved in this epoch
+            if best_val_loss < epoch_best_val_loss:
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+                print(f"⚠️ No improvement for {epochs_no_improve} epochs")
+
+            if epochs_no_improve >= early_stopping_patience:
+                print(f"⛔ Early stopping triggered after {early_stopping_patience} epochs!")
+                return train_losses, val_losses, track_tokens_seen
 
             # Print a sample text after each epoch
             # self.generate_and_print_sample(
