@@ -471,7 +471,11 @@ class Opal:
                                       context_size, top_k=top_k, 
                                       temperature=1.5)
             decoded_text = self.token_ids_to_text(token_ids)
+            print("\n")
+            print("==========================================")
             print(decoded_text.replace("\n", " "))  # Compact print format
+            print("==========================================")
+            print("\n")
         model.train()
 
             
