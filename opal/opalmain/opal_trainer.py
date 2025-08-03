@@ -798,7 +798,7 @@ class Opal:
             optimizer_state_dict = checkpoint.get("optimizer_state_dict", None)
             scheduler_state_dict = checkpoint.get("scheduler_state_dict", None)
             model.to(device)
-        #print(checkpoint)
+        print(model)
         return (
             model,
             optimizer_state_dict  if optimizer_state_dict else None,
