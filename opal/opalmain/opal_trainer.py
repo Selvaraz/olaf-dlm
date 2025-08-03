@@ -973,7 +973,7 @@ class Opal:
         weight_decay=0.1,
         eval_freq=5,
         eval_iter=5,
-        start_context="Cisco discovery ",
+        start_context="Hi Olaf, debug why my CLI command 'show ip route' is not working. ",
         log_to_tensorboard=True,
         log_to_wandb=False,
         wandb_project="opal-training",
