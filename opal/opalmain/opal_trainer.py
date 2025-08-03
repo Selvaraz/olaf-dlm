@@ -792,7 +792,9 @@ class Opal:
             # Load model with saved config to ensure same architecture
             config = checkpoint["config"]
             model = model_class(config).to(device)
-            model.load_state_dict(checkpoint["model_state_dict"])
+            missing, unexpected = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+            print("❌ Missing keys:", missing)
+            print("⚠️ Unexpected keys:", unexpected)
             optimizer_state_dict = checkpoint.get("optimizer_state_dict", None)
             scheduler_state_dict = checkpoint.get("scheduler_state_dict", None)
             model.to(device)
