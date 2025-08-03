@@ -69,6 +69,41 @@ _GPT_CONFIG_OPAL_FINETUNE_20M = {
     "gradient_accumulation_steps": 2, # ✅ Useful if GPU memory is low
 }
 
+
+_GPT_CONFIG_OPAL_92M = {
+    "vocab_size": 8000,
+    "context_length": 1280,       # ↑ for longer prompts
+    "emb_dim": 768,               # ↑ better token representations
+    "n_heads": 12,                 # scales well with emb_dim
+    "n_layers": 12,               # ↑ more reasoning depth
+    "drop_rate": 0.1,            # lower dropout for accuracy
+    "transformer_drop_rate": 0.1,
+    "attention_drop_rate": 0.1,
+    "qkv_bias": False,
+    "num_epoch": 20,
+    "learning_rate": 3e-4,
+    "weight_decay": 0.1,
+    "early_stopping_patience": 6,
+    "persistent_workers": False,
+    "gradient_accumulation_steps": 1,  # ✅ Add explicitly
+    "max_grad_norm": 1.0               # ✅ Add gradient clipping
+}
+
+_GPT_CONFIG_OPAL_FINETUNE_92M = {
+    **_GPT_CONFIG_OPAL_92M,
+    "drop_rate": 0.05,
+    "transformer_drop_rate": 0.05,
+    "attention_drop_rate": 0.05,
+
+    # 🔹 Fine-tuning Hyperparameters
+    "num_epoch": 8,                   # ✅ Fewer epochs to prevent overfitting
+    "learning_rate": 3e-5,            # ✅ Slightly higher for better adaptation
+    "weight_decay": 0.05,
+    "early_stopping_patience": 3,
+    "gradient_accumulation_steps": 2, # ✅ Useful if GPU memory is low
+}
+
+
 _GPT_CONFIG_OPAL_GPU_8M = {
     **_GPT_CONFIG_OPAL_CPU_8M,
     # You can override GPU-specific model parameters if needed
@@ -86,6 +121,7 @@ _TRAINING_CONFIG_GPU = {
     "mixed_precision": torch.cuda.is_available(),
     "gradient_accumulation_steps": 1
 }
+
 
 
 # -----------------------------
@@ -108,5 +144,5 @@ _TRAINING_CONFIG_CPU = {
 USE_GPU = torch.cuda.is_available()  # Change this if you want to force CPU/GPU
 
 #OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_GPU_8M if USE_GPU else _GPT_CONFIG_OPAL_CPU_8M
-OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_20M
+OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_92M
 TRAINING_CONFIG = _TRAINING_CONFIG_GPU if USE_GPU else _TRAINING_CONFIG_CPU
