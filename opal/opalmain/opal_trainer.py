@@ -248,6 +248,7 @@ class Opal:
     def generate(self, model, idx, max_new_tokens, context_size, 
                     temperature=0.0, top_k=None, top_p=None, eos_id=None):
 
+        repetition_penalty=1.2  
         # The following loop generates one token at a time, for a total
         # of max_new_tokens iterations. At each iteration, the model
         # is fed the current sequence (idx) and generates a new token.
@@ -266,6 +267,8 @@ class Opal:
             logits = logits[:, -1, :]  # ✅ Take only last token logits
 
             #logits = model_output["logits"][0, -1, :]  # Take logits of the last token position
+            for token in set(idx[0].tolist()):
+                logits[:, token] /= repetition_penalty
 
             #  Apply temperature scaling (makes probabilities sharper or smoother)
             if temperature > 0.0:
@@ -973,7 +976,7 @@ class Opal:
         weight_decay=0.1,
         eval_freq=5,
         eval_iter=5,
-        start_context="Hi Olaf, debug why my CLI command 'show ip route' is not working. ",
+        start_context="Help me find why 'show ip route' CLI fails",
         log_to_tensorboard=True,
         log_to_wandb=False,
         wandb_project="opal-training",
