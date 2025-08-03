@@ -34,7 +34,7 @@ _GPT_CONFIG_OPAL_FINETUNE = {
 
     # 🔹 Fine-tuning Hyperparameters
     "num_epoch": 15,                 # Fewer epochs to prevent overfitting
-    "learning_rate": 5e-5,           # Lower LR for stable fine-tuning
+    "learning_rate": 1e-5,           # Lower LR for stable fine-tuning
     "weight_decay": 0.05,            # Smaller weight decay
     "early_stopping_patience": 3,    # Stop earlier if no improvement
     "persistent_workers": False,     # Keep as False for CPU training
