@@ -1,5 +1,5 @@
 
-class OpalConstantsRunPod:
+class OpalConstants:
     """Class to hold all constants used in Opal"""
 
     # RUNTIME PATHS
@@ -13,11 +13,11 @@ class OpalConstantsRunPod:
     DATA_DIR = f"{RUNTIME_ROOT_PATH}/dataset"
     PRETRAIN_DATA_PATH = f"{DATA_DIR}/corpus_olaf.txt"
     TOKENIZER_MODEL_PATH = f"{RUNTIME_ROOT_PATH}/olaf-dlm/opal/tokenizer/olaf_tokenizer_073125.model"
-    
+    FINETUNE_DATA_PATH = f"{DATA_DIR}/QA_finetune_final.jsonl"
 
     
 
-class OpalConstants:
+class OpalConstantsCPU:
     """Class to hold all constants used in Opal"""
 
     # RUNTIME PATHS
