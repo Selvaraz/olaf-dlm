@@ -316,7 +316,7 @@ class Opal:
                 idx_next = torch.argmax(logits, dim=-1, keepdim=True)
 
             # Stop early if EOS (end-of-sequence) token is generated
-            if eos_id is not None and idx_next == eos_id:
+            if eos_id is not None and idx_next.item() == eos_id:
                 break
 
             # Append the predicted token to the sequence
