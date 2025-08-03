@@ -555,7 +555,10 @@ class Opal:
         with torch.no_grad():
             token_ids = self.generate(model, encoded, 25, 
                                       context_size, top_k=top_k, 
-                                      temperature=1.5)
+                                      temperature=1.2,
+                                      max_new_tokens=50,
+                                      eos_id=tokenizer.eos_id(),
+                                      repetition_penalty=1.2 )
             decoded_text = self.token_ids_to_text(token_ids)
             print("\n")
             print("==========================================")
@@ -585,36 +588,39 @@ class Opal:
         return torch.nn.Parameter(torch.tensor(right))
     
     def calc_loss_batch(self, input_batch, target_batch, model, device):
-        """Calculate loss for both pretraining (input, target) and fine-tuning (input+labels)."""
-        device = TRAINING_CONFIG["device"]
+        """
+        Compute the loss for a single batch during training.
 
-        # Move to device
-        if isinstance(input_batch, torch.Tensor):
-            input_batch = input_batch.to(device)
-        if isinstance(target_batch, torch.Tensor):
-            target_batch = target_batch.to(device)
+        ✅ Updated to use the model's built-in loss computation (Hugging Face style)
+        ✅ No duplicate CrossEntropyLoss computation
+        ✅ Works for both pretraining and fine-tuning
+        """
 
-        if self.is_finetune:
-            # Fine-tuning: model returns dict with loss when labels are passed
-            if TRAINING_CONFIG["mixed_precision"]:
-                with torch.cuda.amp.autocast():
-                    output = model(input_batch, target_batch)
-            else:   
-                output = model(input_batch, target_batch)
+        # Move inputs to the correct device
+        input_batch = input_batch.to(device)
+        target_batch = target_batch.to(device)
 
-            loss = output["loss"] if isinstance(output, dict) else output
+        # 1️⃣ Forward pass: Let the model compute logits and loss
+        # If labels are provided, the model itself computes loss (with ignore_index=-100)
+        model_output = model(input_batch, labels=target_batch)
+
+        # 2️⃣ Extract loss properly
+        if isinstance(model_output, dict):
+            # Preferred path – model returns {"logits": ..., "loss": ...}
+            loss = model_output.get("loss", None)
+            if loss is None:
+                # Fallback if loss not computed in forward()
+                logits = model_output["logits"]
+                loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+                loss = loss_fct(logits.view(-1, logits.size(-1)), target_batch.view(-1))
         else:
-            # Pretraining: manually compute loss using CrossEntropy
-            loss_fn = torch.nn.CrossEntropyLoss()
-            if TRAINING_CONFIG["mixed_precision"]:
-                with torch.cuda.amp.autocast():
-                    logits = model(input_batch)["logits"] if isinstance(model(input_batch), dict) else model(input_batch)
-                    loss = loss_fn(logits.view(-1, logits.size(-1)), target_batch.view(-1))
-            else:
-                logits = model(input_batch)["logits"] if isinstance(model(input_batch), dict) else model(input_batch)
-                loss = loss_fn(logits.view(-1, logits.size(-1)), target_batch.view(-1))
+            # If model returns only logits (legacy behavior)
+            logits = model_output
+            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+            loss = loss_fct(logits.view(-1, logits.size(-1)), target_batch.view(-1))
 
         return loss
+
 
 
     def calc_loss_loader(self,data_loader, model, device, num_batches=None):

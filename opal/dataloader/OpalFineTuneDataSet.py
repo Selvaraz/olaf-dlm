@@ -35,12 +35,12 @@ class OpalFinetuneDataset(Dataset):
             #print("OpalFineTuneDataset: Input token IDs min:", min(input_ids), "max:", max(input_ids))
             #print("UNK ID:", self.tokenizer.pad_id())
 
+            # Mask prompt tokens so loss is applied only on response
+            prompt_ids = self.tokenizer.encode(f"<BOS> {prompt}", out_type=int)
             # Truncate if too long
             if len(input_ids) > self.max_length:
                 input_ids = input_ids[:self.max_length]
-
-            # Mask prompt tokens so loss is applied only on response
-            prompt_ids = self.tokenizer.encode(prompt, out_type=int)
+                
             prompt_len = min(len(prompt_ids), len(input_ids))
 
             # Apply the masks for the prompt tokens, so our DLM does not 

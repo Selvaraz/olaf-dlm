@@ -218,12 +218,10 @@ def model_train_test_():
     opalInstance.plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses, checkpoint_path)
 
 
-
-
 def calculate_model_size():
     model = OpalGPT(OPAL_MODEL_CONFIG)
     total_params = sum(p.numel() for p in model.parameters())
-    print("Total number of trainable model parameters: ", total_params)
+    print("Total number of trainable model parameters: {:.2f}M".format(total_params / 1e6))
 
     total_size_bytes = total_params * 4
     total_size_mb = total_size_bytes / (1024 * 1024)
@@ -279,4 +277,4 @@ def transformer_test():
 
 calculate_model_size()
 
-model_pretrain_test()
+#model_pretrain_test()

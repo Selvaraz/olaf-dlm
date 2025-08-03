@@ -56,8 +56,8 @@ class OpalDataset(Dataset):
             input_chunk = token_ids[i : i + self.max_length]
             target_chunk = token_ids[i + 1 : i + self.max_length + 1]
 
-            input_chunks.append(torch.tensor(input_chunk, dtype=torch.long))
-            target_chunks.append(torch.tensor(target_chunk, dtype=torch.long))
+            input_chunks.append(torch.tensor(input_chunk, dtype=torch.long, device=self.device))
+            target_chunks.append(torch.tensor(target_chunk, dtype=torch.long, device=self.device))
 
         return input_chunks, target_chunks
 

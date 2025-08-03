@@ -1,5 +1,5 @@
 
-class OpalConstants:
+class OpalConstants_:
     """Class to hold all constants used in Opal"""
 
     # RUNTIME PATHS
@@ -17,7 +17,7 @@ class OpalConstants:
 
     
 
-class OpalConstantsCPU:
+class OpalConstants:
     """Class to hold all constants used in Opal"""
 
     # RUNTIME PATHS

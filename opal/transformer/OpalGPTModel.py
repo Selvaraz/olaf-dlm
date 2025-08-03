@@ -100,11 +100,11 @@ class OpalGPT(nn.Module):
         # Get the logits for the output of the final layer normalization
         logits = self.out_head(x)
         
+        loss = None
         # Return the logits
         if labels is not None:
-            loss_fct = nn.CrossEntropyLoss()
-            #print("Configuration object:", self.cfg)
-            loss = loss_fct(logits.view(-1, self.cfg["vocab_size"]), labels.view(-1))
-            return {"logits": logits, "loss": loss}
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            # loss = loss_fct(logits.view(-1, self.cfg["vocab_size"]), labels.view(-1))
+            loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
 
-        return {"logits": logits}   
+        return {"logits": logits, "loss": loss}
