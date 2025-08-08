@@ -9,7 +9,7 @@ def clean_gutenberg_headers(line: str, inside_content: bool) -> (bool, bool):
         return True, False
     if inside_content and "*** END OF" in line:
         return inside_content, True
-    return inside_content, False
+    return inside_content, False    
 
 
 def process_book_streaming(book_path: Path, merged_file):

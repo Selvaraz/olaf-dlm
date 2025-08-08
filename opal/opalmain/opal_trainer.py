@@ -37,8 +37,9 @@ class Opal:
         self.is_finetune = is_finetune
         self.finetune_data_path = finetune_data_path
     
-    def collate_finetune(self, batch, pad_id=0):
+    def collate_finetune(self, batch):
         """Return a tuple (input_ids, labels) to match the model's forward(input, labels) signature."""
+        pad_id = self.tokenizer.pad_id() if self.tokenizer.pad_id() >= 0 else self.tokenizer.unk_id()
         max_len = max(len(x[0]) for x in batch)
         input_ids, labels = [], []
 
@@ -105,9 +106,6 @@ class Opal:
             tokenizer=self.tokenizer,
         )
 
-        # Get pad token ID
-        pad_id = self.tokenizer.pad_id() if self.tokenizer.pad_id() >= 0 else self.tokenizer.unk_id()
-
         # Set batch size
         if batch_size is None:
             batch_size = TRAINING_CONFIG.get("batch_size", 4)
@@ -122,7 +120,7 @@ class Opal:
             drop_last=drop_last,
             num_workers=num_workers,
             pin_memory=True,
-            collate_fn=lambda batch: self.collate_finetune(batch, pad_id=pad_id)
+            collate_fn=self.collate_finetune
         )
 
     def createOpalDataLoader(
@@ -171,7 +169,7 @@ class Opal:
         # Use persistent_workers=True and prefetch_factor=4 to reduce worker startup overhead
         return DataLoader(
             dataset,
-            batch_size=TRAINING_CONFIG["batch_size"],
+            batch_size=TRAINING_CONFIG["batch_size"] if batch_size is None else batch_size,
             shuffle=shuffle,
             drop_last=drop_last,
             num_workers=num_workers,
@@ -246,9 +244,9 @@ class Opal:
 
     # Ex: top_p=0.9 and optionally temperature > 0.7
     def generate(self, model, idx, max_new_tokens, context_size, 
-                    temperature=0.0, top_k=None, top_p=None, eos_id=None):
+                    temperature=0.0, top_k=None, top_p=None, 
+                    eos_id=None, repetition_penalty=1.2):
 
-        repetition_penalty=1.2  
         # The following loop generates one token at a time, for a total
         # of max_new_tokens iterations. At each iteration, the model
         # is fed the current sequence (idx) and generates a new token.
@@ -483,7 +481,6 @@ class Opal:
                     cpu_mem_mb = psutil.Process().memory_info().rss / (1024 * 1024)
                     gpu_mem_mb = torch.cuda.memory_allocated(device) / (1024 * 1024) if torch.cuda.is_available() else 0
                     
-
                     print(f"Ep {epoch+1} (Step {global_step+1:06d}/{total_steps:06d}): "
                         f"Train loss {train_loss:.3f}, Val loss {val_loss:.3f}, "
                         f"CPU mem {cpu_mem_mb:.2f} MB, GPU mem {gpu_mem_mb:.2f} MB, "
@@ -553,12 +550,13 @@ class Opal:
         context_size = model.positional_embeddings.weight.shape[0]
         encoded = self.text_to_token_ids(start_context).to(device)
         with torch.no_grad():
-            token_ids = self.generate(model, encoded, 25, 
-                                      context_size, top_k=top_k, 
+            token_ids = self.generate(model=model, idx=encoded, 
+                                      context_size=context_size, 
+                                      top_k=top_k, 
                                       temperature=1.2,
                                       max_new_tokens=50,
                                       eos_id=tokenizer.eos_id(),
-                                      repetition_penalty=1.2 )
+                                      repetition_penalty=1.2)
             decoded_text = self.token_ids_to_text(token_ids)
             print("\n")
             print("==========================================")
@@ -591,9 +589,17 @@ class Opal:
         """
         Compute the loss for a single batch during training.
 
-        ✅ Updated to use the model's built-in loss computation (Hugging Face style)
-        ✅ No duplicate CrossEntropyLoss computation
-        ✅ Works for both pretraining and fine-tuning
+        Reads the input and target tensors, moves them to the specified device,
+        and computes the loss using the model's forward method.
+
+        Args:
+            input_batch (torch.Tensor): Input tensor batch (e.g., token IDs).
+            target_batch (torch.Tensor): Target tensor batch (e.g., labels).
+            model (torch.nn.Module): The model used for training.
+            device (str): The device to perform the computation on ('cpu' or 'cuda').
+
+        Returns:
+            torch.Tensor: The computed loss value.
         """
 
         # Move inputs to the correct device
@@ -957,13 +963,30 @@ class Opal:
             "quant_model": quant_path
         }
     
-    def check_new_tokens(self, texts):
+    def check_new_tokens(self, text_or_list):
+        """Check for unknown tokens in text or list of texts."""
         new_tokens_found = False
+        
+        # Handle both single text and list of texts
+        texts = [text_or_list] if isinstance(text_or_list, str) else text_or_list
+        
         for text in texts:
-            tokens = self.tokenizer.encode(text, out_type=str)
-            if "<unk>" in tokens:
-                print(f"⚠️ New tokens found in text: {text}")
-                new_tokens_found = True
+            # Process in chunks for large texts to avoid memory issues
+            chunk_size = 10000  # Process 10k characters at a time
+            if len(text) > chunk_size:
+                for i in range(0, len(text), chunk_size):
+                    chunk = text[i:i + chunk_size]
+                    tokens = self.tokenizer.encode(chunk, out_type=str)
+                    if "<unk>" in tokens:
+                        print(f"⚠️ New tokens found in text chunk: {chunk[:100]}...")
+                        new_tokens_found = True
+                        break
+            else:
+                tokens = self.tokenizer.encode(text, out_type=str)
+                if "<unk>" in tokens:
+                    print(f"⚠️ New tokens found in text: {text[:100]}...")
+                    new_tokens_found = True
+        
         return new_tokens_found
 
     # Train and save model, Main training loop function
@@ -1055,33 +1078,79 @@ class Opal:
                 raise ValueError("finetune_data_path must be provided for fine-tuning")
 
             print(f"-- Fine-tuning with {finetune_data_path}")
+            
+            # Load data once and split it
+            with open(finetune_data_path, "r", encoding="utf-8") as f:
+                all_data = []
+                for line in f:
+                    try:
+                        all_data.append(json.loads(line.strip()))
+                    except json.JSONDecodeError:
+                        print(f"⚠ Skipping malformed JSONL line: {line[:50]}...")
+    
+            # Split data for training and validation
+            split_idx = int(train_ratio * len(all_data))
+            train_data = all_data[:split_idx]
+            val_data = all_data[split_idx:]
+    
+            # Create temporary files for split data
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as train_file:
+                for item in train_data:
+                    train_file.write(json.dumps(item) + '\n')
+                train_file_path = train_file.name
+    
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as val_file:
+                for item in val_data:
+                    val_file.write(json.dumps(item) + '\n')
+                val_file_path = val_file.name
+    
             training_loader = self.createOpalFinetuneDataLoader(
-                data_jsonl=finetune_data_path,
+                data_jsonl=train_file_path,
                 batch_size=batch_size,
                 max_length=config["context_length"],
                 shuffle=True,
                 num_workers=TRAINING_CONFIG["num_workers"]
             )
-            print("✅ Created training DataLoader")
             val_loader = self.createOpalFinetuneDataLoader(
-                data_jsonl=finetune_data_path,
+                data_jsonl=val_file_path,
                 batch_size=batch_size,
                 max_length=config["context_length"],
                 shuffle=False,
                 num_workers=TRAINING_CONFIG["num_workers"]
             )
-            print("✅ Created validation DataLoader")
+    
+            # Clean up temporary files after use
+            import atexit
+            atexit.register(lambda: os.unlink(train_file_path) if os.path.exists(train_file_path) else None)
+            atexit.register(lambda: os.unlink(val_file_path) if os.path.exists(val_file_path) else None)
         else:
             # Original pretraining corpus split
             if isinstance(corpus_text, str):
                 total_tokens = len(tokenizer.encode(corpus_text))
                 split_idx = int(train_ratio * total_tokens)
                 train_data, val_data = corpus_text[:split_idx], corpus_text[split_idx:]
+                
+                training_loader = self.createOpalDataLoader(
+                    txt=train_data,
+                    max_length=config["context_length"],
+                    stride=config["context_length"],
+                    shuffle=True,
+                    num_workers=TRAINING_CONFIG["num_workers"],
+                )
+                val_loader = self.createOpalDataLoader(
+                    txt=val_data,
+                    max_length=config["context_length"],
+                    stride=config["context_length"],
+                    shuffle=False,
+                    num_workers=TRAINING_CONFIG["num_workers"],
+                )
             else:
+                # Handle tensor/tokenized data
                 total_length = len(corpus_text)
                 split_idx = int(train_ratio * total_length)
                 train_data, val_data = corpus_text[:split_idx], corpus_text[split_idx:]
-
+                
                 training_loader = self.createOpalDataLoader(
                     txt=train_data,
                     max_length=config["context_length"],

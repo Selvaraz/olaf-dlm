@@ -36,6 +36,8 @@ class OpalGPT(nn.Module):
         self.out_head = nn.Linear(
             cfg["emb_dim"], cfg["vocab_size"], bias=False
         )
+        # tie embeddings
+        self.out_head.weight = self.token_embeddings.weight
 
         self.cfg = cfg
 
@@ -53,7 +55,7 @@ class OpalGPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, input_token_ids, labels=None):
+    def forward(self, input_token_ids, labels=None, past_key_values=None, use_cache=False):
         """
         Compute the output of the GPT model given an input sequence.
 
@@ -69,7 +71,10 @@ class OpalGPT(nn.Module):
         logits : torch.FloatTensor
             Output logits of shape (batch_size, sequence_length, vocab_size)
         """
-        
+        # cache: added (past_key_values, use_cache) to support fast decode with KV-cache.
+        #        - past_key_values: list of (past_key, past_value) per layer, or None
+        #        - when use_cache=True, we also return present_key_values for the next step
+
         # Get the batch size and sequence length from the input token IDs
         batch_size, seq_len = input_token_ids.shape
         
@@ -86,13 +91,23 @@ class OpalGPT(nn.Module):
         )
         
         # Add the token embeddings and positional embeddings
-        x = tok_embeds + pos_embeds
+        x = tok_embeds if self.cfg.get("use_rope", True) else (tok_embeds + pos_embeds)
         
         # Apply dropout to the embeddings
         x = self.drop_embeddings(x)
         
+        # cache: normalize past_key_values length and structure
+        if past_key_values is None:
+            past_key_values = [(None, None)] * len(self.transformers_block)
+
         # Pass the embeddings through the transformer blocks
-        x = self.transformers_block(x)
+        # cache: we need to loop blocks to pass per-layer caches in/out (can't call nn.Sequential directly).
+        present_key_values = [] if use_cache else None
+        for i, block in enumerate(self.transformers_block):
+            pk, pv = past_key_values[i]
+            x, pk_new, pv_new = block(x, past_key=pk, past_value=pv, use_cache=use_cache)
+            if use_cache:
+                present_key_values.append((pk_new, pv_new))
         
         # Apply layer normalization to the output of the transformer blocks
         x = self.final_norm(x)
@@ -107,4 +122,8 @@ class OpalGPT(nn.Module):
             # loss = loss_fct(logits.view(-1, self.cfg["vocab_size"]), labels.view(-1))
             loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
 
-        return {"logits": logits, "loss": loss}
+        # cache: return present_key_values only when use_cache=True (inference-time)
+        if use_cache:
+            return {"logits": logits, "loss": loss, "present_key_values": present_key_values}
+        else:
+            return {"logits": logits, "loss": loss}

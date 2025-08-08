@@ -19,8 +19,6 @@ FIXED_USER_TOKENS = [
         "<FLOAT>",
         "<LONG>",
         "<ULL>",
-        "<PTR>",
-        "<CHAR>",
         "<USER>",
         "<ASSISTANT>",
         "<URL>",

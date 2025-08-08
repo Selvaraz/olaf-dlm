@@ -46,13 +46,16 @@ _GPT_CONFIG_OPAL_20M = {
     "transformer_drop_rate": 0.1,
     "attention_drop_rate": 0.1,
     "qkv_bias": False,
-    "num_epoch": 20,
+    "num_epoch": 1,
     "learning_rate": 3e-4,
     "weight_decay": 0.1,
     "early_stopping_patience": 6,
     "persistent_workers": False,
     "gradient_accumulation_steps": 1,  # ✅ Add explicitly
-    "max_grad_norm": 1.0               # ✅ Add gradient clipping
+    "max_grad_norm": 1.0,               # ✅ Add gradient clipping
+    "kv_heads" : 1,                # MQA
+    "use_rope": True,              # Rotary pos embeddings
+    "tie_embeddings": True          # Tie input/output embeddings
 }
 
 _GPT_CONFIG_OPAL_FINETUNE_20M = {
@@ -144,5 +147,13 @@ _TRAINING_CONFIG_CPU = {
 USE_GPU = torch.cuda.is_available()  # Change this if you want to force CPU/GPU
 
 #OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_GPU_8M if USE_GPU else _GPT_CONFIG_OPAL_CPU_8M
-OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_92M
+OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_20M
 TRAINING_CONFIG = _TRAINING_CONFIG_GPU if USE_GPU else _TRAINING_CONFIG_CPU
+
+
+# ---- Small-model efficiency flags (defaults) ----
+for _cfg_name, _cfg in list(globals().items()):
+    if isinstance(_cfg, dict) and _cfg.get("vocab_size") and _cfg.get("emb_dim"):
+        _cfg.setdefault("kv_heads", 1)         # MQA
+        _cfg.setdefault("use_rope", True)      # Rotary pos embeddings
+        _cfg.setdefault("tie_embeddings", True)
