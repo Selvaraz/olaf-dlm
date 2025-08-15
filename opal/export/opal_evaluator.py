@@ -4,7 +4,7 @@ import numpy as np
 import sentencepiece as spm
 from torch.nn import functional as F
 from ..transformer.OpalGPTModel import OpalGPT
-from ..config.opal_config import OPAL_MODEL_CONFIG
+from ..config.opal_config import OPAL_MODEL_CONFIG, TRAINING_CONFIG
 from ..dataloader.OpalDataSet import OpalDataset
 from torch.utils.data import DataLoader
 import argparse
@@ -36,9 +36,9 @@ def evaluate_onnx(onnx_path, dataset_loader, device=None):
     """
     Evaluate a quantized ONNX model on a dataset and compute loss & perplexity.
     """
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = TRAINING_CONFIG["device"]
     
+
     session = ort.InferenceSession(
         onnx_path,
         providers=["CPUExecutionProvider"] if device == "cpu" else ["CUDAExecutionProvider"]

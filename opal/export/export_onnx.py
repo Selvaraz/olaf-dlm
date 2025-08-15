@@ -1,3 +1,4 @@
+from opal.config.opal_config import TRAINING_CONFIG
 import torch
 from onnxruntime.quantization import quantize_dynamic, QuantType
 from opal.transformer.OpalGPTModel import OpalGPT
@@ -22,8 +23,7 @@ def export_and_quantize_model(
         (str, str): Paths of exported ONNX and quantized models
     """
 
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = TRAINING_CONFIG["device"]
 
     # 1. Load model and weights
     print(f"Loading model from {checkpoint_path}...")

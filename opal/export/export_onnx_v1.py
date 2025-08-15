@@ -11,18 +11,18 @@ It produces TWO files:
      - input_token_ids: int64[batch, T]
    Outputs:
      - logits: float32[batch, T, vocab]
-     - present_key_i:   float16[batch, H_exp, T, Dh]   for i in [0..L-1]
-     - present_value_i: float16[batch, H_exp, T, Dh]   for i in [0..L-1]
+     - present_key_i:   float16[batch, H_kv, T, Dh]   for i in [0..L-1]   # cache: H_kv (kv_heads), not expanded H
+     - present_value_i: float16[batch, H_kv, T, Dh]   for i in [0..L-1]   # cache: H_kv (kv_heads)
 
 2) decode.onnx
    Inputs:
      - input_token_ids: int64[batch, 1]
-     - past_key_i:      float16[batch, H_exp, Tpast, Dh]
-     - past_value_i:    float16[batch, H_exp, Tpast, Dh]
+     - past_key_i:      float16[batch, H_kv, Tpast, Dh]                  # cache: H_kv
+     - past_value_i:    float16[batch, H_kv, Tpast, Dh]                  # cache: H_kv
    Outputs:
      - logits: float32[batch, 1, vocab]
-     - present_key_i:   float16[batch, H_exp, Tpast+1, Dh]
-     - present_value_i: float16[batch, H_exp, Tpast+1, Dh]
+     - present_key_i:   float16[batch, H_kv, Tpast+1, Dh]                # cache: H_kv
+     - present_value_i: float16[batch, H_kv, Tpast+1, Dh]                # cache: H_kv
 
      # FP32 export (recommended if you’ll quantize)
     python scripts/export_kvcache_onnx.py \
@@ -36,7 +36,7 @@ It produces TWO files:
 
 Notes
 -----
-- H_exp = expanded head count seen by attention after MQA/GQA. With MQA (kv_heads=1, n_heads=8), H_exp = 8.
+- H_kv = number of K/V heads kept in cache (kv_heads). With MQA (kv_heads=1, n_heads=8), H_kv = 1.
 - These shapes/names match the C snippets I gave you earlier.
 - For INT8: only weights are int8; I/O dtypes are unchanged (ids=int64, logits=float32, cache=float16).
 """
@@ -108,11 +108,9 @@ def build_model(cfg, ckpt_path: str):
     return model
 
 
-def expanded_heads(cfg):
-    H = cfg["n_heads"]
-    kv_h = cfg.get("kv_heads", H)
-    # After expansion, attention runs with H heads
-    return H
+# cache: use kv_heads for cache shapes, not num_heads
+def kv_head_count(cfg):
+    return int(cfg.get("kv_heads", cfg["n_heads"]))
 
 
 def export_prefill(model, cfg, out_dir: Path, seq_len: int, batch: int, opset: int) -> Path:
@@ -184,7 +182,7 @@ def export_decode(model, cfg, out_dir: Path, past_len: int, batch: int, opset: i
 
     wrapper = DecodeWrapper(model, L)
 
-    H_exp = expanded_heads(cfg)
+    H_kv = kv_head_count(cfg)                        # cache: use kv_heads here
     Dh = cfg["emb_dim"] // cfg["n_heads"]
     vocab = cfg["vocab_size"]
 
@@ -193,8 +191,8 @@ def export_decode(model, cfg, out_dir: Path, past_len: int, batch: int, opset: i
     # Build dummy past in fp16 with past_len time-steps
     past = []
     for _ in range(L):
-        past_k = torch.zeros((batch, H_exp, past_len, Dh), dtype=torch.float16)
-        past_v = torch.zeros((batch, H_exp, past_len, Dh), dtype=torch.float16)
+        past_k = torch.zeros((batch, H_kv, past_len, Dh), dtype=torch.float16)  # cache: H_kv not H
+        past_v = torch.zeros((batch, H_kv, past_len, Dh), dtype=torch.float16)  # cache: H_kv not H
         past += [past_k, past_v]
 
     in_names = ["input_token_ids"]

@@ -1,4 +1,40 @@
+import os
 import torch
+import psutil 
+
+def get_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    elif torch.backends.mps.is_available():
+        return "mps"
+    else:
+        return "cpu"
+
+def is_gpu_available():
+    return torch.cuda.is_available() or torch.backends.mps.is_available()
+
+
+def get_scaler():
+    if torch.cuda.is_available():
+        return torch.cuda.amp.GradScaler()
+    elif torch.backends.mps.is_available():
+        return torch.amp.GradScaler("mps")
+    else:
+        return None
+
+def get_gpu_memory_allocated_size():
+    gpu_mem_mb = 0
+    
+    if torch.cuda.is_available():
+        gpu_mem_mb = torch.cuda.memory_allocated()
+    elif torch.backends.mps.is_available():
+        process = psutil.Process(os.getpid())
+        mem_bytes = process.memory_info().rss  # includes unified memory
+        gpu_mem_mb = mem_bytes / (1024 * 1024)
+    else:
+        gpu_mem_mb = 0
+
+    return gpu_mem_mb
 
 # -----------------------------
 # Define Model Configurations
@@ -46,7 +82,7 @@ _GPT_CONFIG_OPAL_20M = {
     "transformer_drop_rate": 0.1,
     "attention_drop_rate": 0.1,
     "qkv_bias": False,
-    "num_epoch": 1,
+    "num_epoch": 10,
     "learning_rate": 3e-4,
     "weight_decay": 0.1,
     "early_stopping_patience": 6,
@@ -86,7 +122,7 @@ _GPT_CONFIG_OPAL_92M = {
     "num_epoch": 20,
     "learning_rate": 3e-4,
     "weight_decay": 0.1,
-    "early_stopping_patience": 6,
+    "early_stopping_patience": 10,
     "persistent_workers": False,
     "gradient_accumulation_steps": 1,  # ✅ Add explicitly
     "max_grad_norm": 1.0               # ✅ Add gradient clipping
@@ -117,14 +153,14 @@ _GPT_CONFIG_OPAL_GPU_20M = {
     # You can override GPU-specific model parameters if needed
 }
 
+
 _TRAINING_CONFIG_GPU = {
-    "device": "cuda" if torch.cuda.is_available() else "cpu",
+    "device": get_device(),
     "batch_size": 64,
     "num_workers": 0,
-    "mixed_precision": torch.cuda.is_available(),
+    "mixed_precision": is_gpu_available(),
     "gradient_accumulation_steps": 1
 }
-
 
 
 # -----------------------------
@@ -144,7 +180,7 @@ _TRAINING_CONFIG_CPU = {
 # Select Environment
 # -----------------------------
 
-USE_GPU = torch.cuda.is_available()  # Change this if you want to force CPU/GPU
+USE_GPU = is_gpu_available()  # Change this if you want to force CPU/GPU
 
 #OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_GPU_8M if USE_GPU else _GPT_CONFIG_OPAL_CPU_8M
 OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_20M

@@ -1,3 +1,4 @@
+from opal.config.opal_config import TRAINING_CONFIG
 import torch
 from torch.utils.data import Dataset
 from typing import List, Tuple, Union
@@ -17,15 +18,13 @@ class OpalDataset(Dataset):
             tokenizer: SentencePieceProcessor instance (needed only if txt is str)
             max_length: Max context window (default 1280 for your model)
             stride: Overlap between consecutive chunks
-            device: Device to move tensors to ('cpu' or 'cuda')
+            device: Device to move tensors to ('cpu' or 'cuda' or 'mps')
         """
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        
+
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.stride = stride
-        self.device = device
+        self.device = TRAINING_CONFIG["device"]
 
         # Prepare token chunks (handles both raw text and token IDs)
         self.input_ids, self.target_ids = self._prepare_data(txt)

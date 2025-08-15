@@ -3,6 +3,13 @@ import argparse
 import logging
 from pathlib import Path
 import time
+from typing import Iterable, Iterator
+
+try:
+    from tqdm import tqdm  # type: ignore
+except Exception:  # pragma: no cover - graceful fallback if tqdm missing
+    def tqdm(iterable=None, **kwargs):  # type: ignore
+        return iterable if iterable is not None else []
 
 
 def train_tokenizer(
@@ -11,6 +18,7 @@ def train_tokenizer(
     vocab_size: int = 8000,
     model_type: str = "bpe",
     output_dir: Path = Path("."),
+    show_progress: bool = True,
     block_wrappers = sorted([
         "<BULLET>",
         "</BULLET>",
@@ -37,6 +45,7 @@ def train_tokenizer(
     ]),
 
     user_defined_symbols=sorted([
+        "<SEP>",
         "<ACTION_DEF>",
         "<ASSISTANT>",
         "<CONSTANT_DEF>",
@@ -55,14 +64,12 @@ def train_tokenizer(
         "<FUNC>",
         "<GREEN_OPERATION_DEF>",
         "<HEX>",
-        "<INDEX>",
         "<INSTANCE>",
         "<INT>",
         "<INTERFACE>",
         "<IP>",
         "<IPC>",
         "<LINE>",
-        "<LOG>",
         "<LOOKUP_BY_KEY>",
         "<MAC>",
         "<MODE>",
@@ -92,6 +99,7 @@ def train_tokenizer(
         "<UUID>",
         "u_int8",
         "uses_table_instance",
+        "<STUB>",
     ]),
 ):
     logging.info(f"Starting tokenizer training...")
@@ -113,24 +121,37 @@ def train_tokenizer(
     # Build the full model_prefix path in the output directory
     full_model_prefix = str(output_dir / model_prefix)
 
-    cmd = (
-        f"--input={input_file} "
-        f"--model_prefix={full_model_prefix} "
-        f"--vocab_size={vocab_size} "
-        f"--character_coverage=1.0 "
-        f"--model_type={model_type} "
-        f"--unk_id={3} "
-        f"--pad_id={0} "
-        f"--bos_id={1} "
-        f"--eos_id={2} "
-        f"--user_defined_symbols={','.join(user_defined_symbols)}"
-    )
-
-    logging.info("Training command:")
-    logging.info(cmd)
+    # Helper: iterator that yields lines and updates tqdm if enabled
+    def _line_iterator(path: Path, enable_bar: bool) -> Iterator[str]:
+        # We intentionally don't pre-count lines to avoid extra I/O on huge corpora
+        desc = "Feeding sentences to trainer"
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            if enable_bar:
+                for line in tqdm(f, desc=desc, unit="lines", leave=True):
+                    yield line
+            else:
+                for line in f:
+                    yield line
 
     start_time = time.time()
-    spm.SentencePieceTrainer.Train(cmd)
+    # Use kwargs-based API so we can pass a sentence iterator to show progress.
+    # All parameters mirror the CLI flags used previously.
+    spm.SentencePieceTrainer.train(
+        sentence_iterator=_line_iterator(input_file, show_progress),
+        model_prefix=full_model_prefix,
+        vocab_size=vocab_size,
+        character_coverage=1.0,
+        model_type=model_type,
+        unk_id=3,
+        pad_id=0,
+        bos_id=1,
+        eos_id=2,
+        byte_fallback=True,
+        hard_vocab_limit=False,
+        train_extremely_large_corpus=True,
+        user_defined_symbols=user_defined_symbols,
+        add_dummy_prefix=True,  # Always add dummy prefix for consistency
+    )
     duration = time.time() - start_time
 
     model_file = output_dir / f"{model_prefix}.model"
@@ -202,6 +223,10 @@ Example usage:
         default=".",
         help="Directory where the trained model and vocabulary will be saved. Defaults to current directory."
     )
+    parser.add_argument(
+        "--no_progress",
+        action="store_true",
+        help="Disable tqdm progress bar while feeding sentences to the trainer.")
 
     args = parser.parse_args()
 
@@ -216,7 +241,8 @@ Example usage:
         model_prefix=args.model_prefix,
         vocab_size=args.vocab_size,
         model_type=args.model_type,
-        output_dir=Path(args.output_dir)
+    output_dir=Path(args.output_dir),
+    show_progress=not args.no_progress,
     )
 
 

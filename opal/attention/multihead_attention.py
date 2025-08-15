@@ -4,8 +4,6 @@ from .rope_utils import build_rope_cache, apply_rope
 
 class MultiheadAttention(nn.Module):
     """
-    This class implements the Multihead Attention layer as described in 
-    the paper "Attention is All You Need" by Vaswani et al. 2017.
     The Multihead Attention layer is an extension of the Self-Attention layer, 
     it allows the model to attend to multiple representations of the same sequence 
     simultaneously and weigh their importance.
@@ -133,8 +131,8 @@ class MultiheadAttention(nn.Module):
         # The keys, queries, and values are then reshaped to have the shape
         # (batch, num_tokens, d_out) so that they can be used to compute
         # the attention scores.
-        queries = self.Wq(x)
-        keys = self.Wk(x)
+        queries = self.Wq(x) # (B, T, d_out)
+        keys = self.Wk(x)    # (B, T, kv_heads*Dh) if enable_new_attention else (B, T, d_out)
         values = self.Wv(x)
 
         if not self.enable_new_attention:
@@ -161,7 +159,7 @@ class MultiheadAttention(nn.Module):
             context_vec = context_vec.contiguous().view(batch, num_tokens, self.d_out)
 
             context_vec = self.out_proj(context_vec)
-            return context_vec
+            return context_vec, None, None  # cache: keep return signature consistent
 
         # ===== New code path: RoPE + optional MQA/GQA =====
         # Reshape queries to (batch, num_tokens, num_heads, head_dim)
@@ -169,7 +167,7 @@ class MultiheadAttention(nn.Module):
         # rope: keys/values may have shared kv_heads when kv_heads < num_heads
         keys = keys.view(batch, num_tokens, self.kv_heads, self.head_dim)
         values = values.view(batch, num_tokens, self.kv_heads, self.head_dim)
-
+        
         # rope: apply rotary embeddings to Q and K before any transposes (expects (B,T,H,Dh))
         if self.use_rope:
             self.build_rope(num_tokens, x.device, x.dtype)
@@ -177,16 +175,24 @@ class MultiheadAttention(nn.Module):
             sin = self.rope_sin[:num_tokens]  # (T, Dh/2)
             queries, keys = apply_rope(queries, keys, cos, sin)
 
-        # rope: expand shared K/V across query heads if kv_heads < num_heads (MQA/GQA)
-        if self.kv_heads == 1:
-            # rope: broadcast K/V to all heads without allocating (view-based expand)
-            keys = keys.expand(batch, num_tokens, self.num_heads, self.head_dim)
-            values = values.expand(batch, num_tokens, self.num_heads, self.head_dim)
+        # cache: Append past in Kv shape by time (concat on T)
+        if (past_key is not None) and (past_value is not None):
+            # past_* are (B, Kv, Tpast, Dh) → to (B, Tpast, Kv, Dh) for time concat
+            pk_t = past_key.to(keys.dtype).transpose(1, 2)     # (B, Tpast, Kv, Dh)
+            pv_t = past_value.to(values.dtype).transpose(1, 2) # (B, Tpast, Kv, Dh)
+            keys   = torch.cat([pk_t, keys],   dim=1)          # (B, Ttot, Kv, Dh)
+            values = torch.cat([pv_t, values], dim=1)          # (B, Ttot, Kv, Dh)
+            
+        # cache: Expand Kv → H ONLY for compute (avoid storing expanded cache)
+        if self.kv_heads == self.num_heads:
+            keys_exp, values_exp = keys, values                          # (B,Ttot,H,Dh)
+        elif self.kv_heads == 1:
+            keys_exp   = keys.expand(batch, keys.size(1), self.num_heads, self.head_dim)
+            values_exp = values.expand(batch, values.size(1), self.num_heads, self.head_dim)
         else:
-            # rope: repeat each kv head across groups of query heads (GQA)
             reps = self.num_heads // self.kv_heads
-            keys = keys.repeat_interleave(reps, dim=2)
-            values = values.repeat_interleave(reps, dim=2)
+            keys_exp   = keys.repeat_interleave(reps, dim=2)             # (B,Ttot,H,Dh)
+            values_exp = values.repeat_interleave(reps, dim=2)
 
         # Transpose the keys, queries, and values to have the shape
         # from (batch, num_tokens, num_heads, head_dim) to (batch, num_heads, num_tokens, head_dim) 
@@ -194,15 +200,15 @@ class MultiheadAttention(nn.Module):
         # The keys, queries, and values are then transposed to have the shape
         # (batch, num_heads, num_tokens, head_dim) so that they can be
         # used to compute the attention scores. This is to group the tokens by heads.
-        queries = queries.transpose(1, 2)
-        keys = keys.transpose(1, 2)
-        values = values.transpose(1, 2)
+        queries   = queries.transpose(1, 2)         # (B,H,Tcur,Dh)
+        keys_exp  = keys_exp.transpose(1, 2)        # (B,H,Ttot,Dh)   # cache: use expanded K for compute
+        values_exp= values_exp.transpose(1, 2)      # (B,H,Ttot,Dh)
 
-        # cache: Append past K/V (concatenate over time dim)
-        if (past_key is not None) and (past_value is not None):
-            # Ensure dtype/device match (if caches are fp16 and model is fp32/int8)
-            keys   = torch.cat([past_key.to(keys.dtype),   keys],   dim=2)  # (B,H,Tpast+T,Dh)
-            values = torch.cat([past_value.to(values.dtype), values], dim=2)
+        # # cache: Append past K/V (concatenate over time dim)
+        # if (past_key is not None) and (past_value is not None):
+        #     # Ensure dtype/device match (if caches are fp16 and model is fp32/int8)
+        #     keys   = torch.cat([past_key.to(keys.dtype),   keys],   dim=2)  # (B,H,Tpast+T,Dh)
+        #     values = torch.cat([past_value.to(values.dtype), values], dim=2)
 
         # Compute the scaled dot-product attention scores,
         # The attention scores are computed by taking the dot product of the queries and keys.
@@ -213,7 +219,7 @@ class MultiheadAttention(nn.Module):
         # The dimention for queries is (batch, num_heads, num_tokens, head_dim)
         # The dimention for transposed (2,3) keys is (batch, num_heads, head_dim, num_tokens). So this is
         # the dot product for each head.
-        attn_scores = queries @ keys.transpose(2, 3)
+        attn_scores = queries @ keys_exp.transpose(2, 3)  # cache: compute vs expanded keys
 
         # Apply the mask to the attention scores
         # The mask is applied to the attention scores to prevent the model from attending to future tokens
@@ -221,8 +227,11 @@ class MultiheadAttention(nn.Module):
         # The mask is applied to the attention scores to prevent the model from attending to future tokens.
         # The mask is applied to the attention scores by setting the attention scores to -inf for 
         # the positions that are masked.
-        mask_bool = self.mask.bool()[:num_tokens, :num_tokens]
-        attn_scores.masked_fill_(mask_bool, -torch.inf)
+        # cache: use TOTAL length (past + current) for causality
+        Tcur = queries.shape[-2]
+        Ttot = keys_exp.shape[-2]
+        mask_bool = self.mask.bool()[:Ttot, :Ttot]
+        attn_scores = attn_scores.masked_fill(mask_bool[-Tcur:, :], -torch.inf)
 
         # Compute the softmax of the attention scores, this is to normalize the attention scores
         # The softmax is applied to the attention scores to normalize them. 
@@ -230,7 +239,7 @@ class MultiheadAttention(nn.Module):
         # by the square root of the head dimension.
         # This is done to prevent the attention scores from becoming too large or too small.
         # The dim=-1 is to apply the scaling to the last dimension of the attention scores.
-        attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
+        attn_weights = torch.softmax(attn_scores / (self.head_dim ** 0.5), dim=-1)
 
         # Apply dropout to the attention weights
         # The dropout is applied to the attention weights to prevent overfitting.
@@ -242,7 +251,7 @@ class MultiheadAttention(nn.Module):
         # this is to combine the information from the values based on the attention weights. The
         # Intuition behind transpose(1, 2) is to align the dimensions for the dot product.
         # The resultant dimention of context_vec will be (batch, num_heads, num_tokens, head_dim)
-        context_vec = (attn_weights @ values).transpose(1, 2)
+        context_vec = (attn_weights @ values_exp).transpose(1, 2)  # cache: use expanded V for compute
         # Reshape the context vector to have the shape (batch, num_tokens, d_out)
         # This is done to combine the information from the multiple attention heads into a single output vector
         context_vec = context_vec.contiguous().view(batch, num_tokens, self.d_out)
@@ -252,9 +261,10 @@ class MultiheadAttention(nn.Module):
         context_vec = self.out_proj(context_vec)
         
         if use_cache:
-            # cache: return present caches in fp16 to reduce RAM
-            present_key   = keys.to(torch.float16)
-            present_value = values.to(torch.float16)
+            # cache: return present caches in SMALL Kv shape and fp16 to reduce RAM
+            #        shapes: (B, Kv, Ttot, Dh)
+            present_key   = keys.transpose(1, 2).to(torch.float16)
+            present_value = values.transpose(1, 2).to(torch.float16)
             return context_vec, present_key, present_value
         else:
             return context_vec, None, None

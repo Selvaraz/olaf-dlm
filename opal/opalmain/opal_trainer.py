@@ -15,7 +15,7 @@ from ..dataloader.OpalFineTuneDataSet import OpalFinetuneDataset
 from torch.utils.data import Dataset, DataLoader
 from ..utils.opal_constants import OpalConstants
 from ..export.export_onnx import export_and_quantize_model
-from opal.config.opal_config import TRAINING_CONFIG
+from opal.config.opal_config import TRAINING_CONFIG, get_gpu_memory_allocated_size, get_scaler
 import sentencepiece as spm
 from tqdm import tqdm
 from ..export.opal_evaluator import evaluate_pytorch, evaluate_onnx
@@ -66,7 +66,6 @@ class Opal:
         shuffle: bool = True,
         drop_last: bool = True,
         num_workers: int = 0,
-        device: str = None
     ):
         """
         Creates a DataLoader for fine-tuning using OpalFinetuneDataset.
@@ -78,13 +77,11 @@ class Opal:
             shuffle (bool): Whether to shuffle dataset each epoch.
             drop_last (bool): Drop last batch if incomplete.
             num_workers (int): Number of workers for DataLoader (0 for CUDA to avoid fork issue).
-            device (str): Device to put data on ('cpu' or 'cuda').
+            device (str): Device to put data on ('cpu' or 'cuda' or 'mps').
 
         Returns:
             DataLoader: PyTorch DataLoader for fine-tuning.
         """
-        device = device or TRAINING_CONFIG.get("device", "cuda" if torch.cuda.is_available() else "cpu")
-
         if self.tokenizer is None:
             raise ValueError("Tokenizer must be provided when creating Opal instance.")
         
@@ -145,7 +142,7 @@ class Opal:
             shuffle (bool): Whether to shuffle dataset each epoch.
             drop_last (bool): Drop last batch if incomplete.
             num_workers (int, optional): If None, automatically set to available CPU cores.
-            device (str): Device to put data on ('cpu' or 'cuda').
+            device (str): Device to put data on ('cpu' or 'cuda' or 'mps').
 
         Returns:
             DataLoader: PyTorch DataLoader optimized for your CPU.
@@ -190,18 +187,27 @@ class Opal:
         """
         Tokenizes the entire corpus once and saves as a tensor for faster training restarts.
         """
+
+        print(f"✅  Using the tokenizer model at path: {tokenizer_model}")
+        if not os.path.exists(tokenizer_model):
+            raise ValueError(f"❌  Tokenizer model file not found: {tokenizer_model}")
+        
         sp = spm.SentencePieceProcessor(model_file=tokenizer_model)
 
+        print(f" Loading the corpus text ...")
         with open(input_text_file, "r") as f:
             text = f.read()
         
         if self.check_new_tokens(text) and not self.start_fresh:
             print(f"🚨🚨🚨 New tokens found in text. Pretokenizing corpus...")
             raise ValueError("New tokens found in text. Please start training from scratch with start_fresh=True")
-        
-        # If the directory to the oupout file is not found, create it
+        else:
+            print(f"✅  No new tokens found in text.")
+
+        # If the directory to the output file is not found, create it
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
+        print(f"✅  Pretokenizing corpus... size of corpus: {len(text)}")
         token_ids = torch.tensor(sp.encode(text, out_type=int), dtype=torch.long)
         torch.save(token_ids, output_file)
 
@@ -231,6 +237,11 @@ class Opal:
         #file_path = parent_dir / "sample_data"  / "the-verdict.txt"
         file_path = OpalConstants.PRETRAIN_DATA_PATH
         pretokenized_path = OpalConstants.PRETOKENIZED_DATA_PATH
+
+        print(f"✅  Using the corpus text at path: {file_path}")
+
+        if not os.path.exists(file_path):
+            raise ValueError(f"❌  Corpus text file not found: {file_path}")
 
         if os.path.exists(pretokenized_path):
             print(f"-- Loading pre-tokenized dataset: {pretokenized_path}")
@@ -379,7 +390,8 @@ class Opal:
         epochs_no_improve = 0  # Track epochs without improvement
         early_stopping_patience = self.config["early_stopping_patience"]
         device = TRAINING_CONFIG["device"]
-        scaler = torch.cuda.amp.GradScaler() if TRAINING_CONFIG["mixed_precision"] else None
+
+        scaler = get_scaler() if TRAINING_CONFIG["mixed_precision"] else None
 
         # Main training loop
         for epoch in range(num_epochs):
@@ -479,7 +491,7 @@ class Opal:
 
                     # Get memory usage
                     cpu_mem_mb = psutil.Process().memory_info().rss / (1024 * 1024)
-                    gpu_mem_mb = torch.cuda.memory_allocated(device) / (1024 * 1024) if torch.cuda.is_available() else 0
+                    gpu_mem_mb = get_gpu_memory_allocated_size() / (1024 * 1024) if get_gpu_memory_allocated_size() > 0 else 0
                     
                     print(f"Ep {epoch+1} (Step {global_step+1:06d}/{total_steps:06d}): "
                         f"Train loss {train_loss:.3f}, Val loss {val_loss:.3f}, "
@@ -913,7 +925,7 @@ class Opal:
         Args:
             final_ckpt (str): Path to final PyTorch checkpoint (.pt file)
             val_loader (DataLoader): Validation DataLoader (already created in parent function)
-            device (str): "cpu" or "cuda"
+            device (str): "cpu" or "cuda" or "mps"
             writer: TensorBoard SummaryWriter (optional)
             log_to_wandb (bool): Whether to log metrics to W&B
         """
