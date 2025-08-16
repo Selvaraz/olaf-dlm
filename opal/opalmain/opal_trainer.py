@@ -183,7 +183,73 @@ class Opal:
         flat = token_ids.squeeze(0)
         return self.tokenizer.decode(flat.tolist())
 
+    ##
+
     def _pretokenize_corpus(self, input_text_file, tokenizer_model, output_file):
+        """
+        Tokenizes the entire corpus and saves as a tensor for faster training restarts.
+        STREAMING implementation: encodes line-by-line to avoid gigantic single-string encode.
+        """
+        print(f"✅  Using the tokenizer model at path: {tokenizer_model}")
+        if not os.path.exists(tokenizer_model):
+            raise ValueError(f"❌  Tokenizer model file not found: {tokenizer_model}")
+        sp = spm.SentencePieceProcessor(model_file=tokenizer_model)
+
+        # Fail fast: tokenizer should produce something for a probe
+        probe = sp.encode("hello world", out_type=int)
+        if not probe:
+            raise RuntimeError("Tokenizer probe returned 0 ids — check TOKENIZER_MODEL_PATH.")
+
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
+        print(f"✅  Pretokenizing corpus (streaming)... from {input_text_file}")
+        eos_id = sp.eos_id() if sp.eos_id() >= 0 else 0
+        add_eos = True
+
+        total_ids = 0
+        total_lines = 0
+        ids_chunks = []  # accumulate moderate-size chunks
+
+        # If the user requested start_fresh=False and we see UNKs, abort early
+        abort_on_unk = (not self.start_fresh)
+
+        with open(input_text_file, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                total_lines += 1
+                line = line.rstrip("\n")
+                if not line:
+                    ids = [eos_id] if add_eos else []
+                else:
+                    ids = sp.encode(line, out_type=int)
+                    if abort_on_unk:
+                        toks = sp.encode(line, out_type=str)
+                        if "<unk>" in toks:
+                            print(f"⚠️ New tokens found (UNK) in line {total_lines}: {line[:120]}")
+                            raise ValueError(
+                                "New tokens found in text. Please start with start_fresh=True "
+                                "(retrain tokenizer or accept UNKs)."
+                            )
+                    if add_eos:
+                        ids.append(eos_id)
+
+                if ids:
+                    ids_chunks.extend(ids)
+                    total_ids += len(ids)
+
+                if total_lines % 100_000 == 0:
+                    print(f"  ...lines={total_lines:,}, ids={total_ids:,}")
+
+        if total_ids == 0:
+            raise RuntimeError("Pretokenization produced 0 token ids. Check filtering/encoding logic.")
+
+        # Save as torch.long to match downstream expectations
+        token_ids = torch.tensor(ids_chunks, dtype=torch.long)
+        torch.save(token_ids, output_file)
+        print(f"-- Pretokenized dataset saved to {output_file} (length={token_ids.numel():,})\n")
+
+
+    ##
+    def __pretokenize_corpus(self, input_text_file, tokenizer_model, output_file):
         """
         Tokenizes the entire corpus once and saves as a tensor for faster training restarts.
         """
