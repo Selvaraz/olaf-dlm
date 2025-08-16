@@ -210,6 +210,41 @@ class MultiheadAttention(nn.Module):
         #     keys   = torch.cat([past_key.to(keys.dtype),   keys],   dim=2)  # (B,H,Tpast+T,Dh)
         #     values = torch.cat([past_value.to(values.dtype), values], dim=2)
 
+        # MPS: Prefer memory-efficient SDPA on MPS (and also works on CUDA) to avoid T×T masks
+        # use_sdpa = (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()) or \
+        #            (hasattr(torch, "cuda") and torch.cuda.is_available())
+        # if use_sdpa:
+        #     import torch.nn.functional as F  # MPS: local import for SDPA
+        #     # MPS: SDPA applies causal masking internally; avoids allocating a giant boolean mask
+        #     attn_out = F.scaled_dot_product_attention(
+        #         queries,            # (B,H,Tcur,Dh)
+        #         keys_exp,           # (B,H,Ttot,Dh)
+        #         values_exp,         # (B,H,Ttot,Dh)
+        #         is_causal=True      # MPS: replaces the triangular mask below
+        #     )
+        #     # Compute the context vector by multiplying the attention weights with the values
+        #     # The context vector is computed by multiplying the attention weights with the values.
+        #     # The context vector is the final output of the attention mechanism. The intution behing
+        #     # this is to combine the information from the values based on the attention weights. The
+        #     # Intuition behind transpose(1, 2) is to align the dimensions for the dot product.
+        #     # The resultant dimention of context_vec will be (batch, num_heads, num_tokens, head_dim)
+        #     context_vec = attn_out.transpose(1, 2)  # cache: use expanded V for compute  # MPS
+        #     # Reshape the context vector to have the shape (batch, num_tokens, d_out)
+        #     # This is done to combine the information from the multiple attention heads into a single output vector
+        #     context_vec = context_vec.contiguous().view(batch, num_tokens, self.d_out)
+        #     # Apply the output projection to the context vector
+        #     # The output projection is a linear layer that transforms the context vector into the final output vector
+        #     context_vec = self.out_proj(context_vec)
+            
+        #     if use_cache:
+        #         # cache: return present caches in SMALL Kv shape and fp16 to reduce RAM
+        #         #        shapes: (B, Kv, Ttot, Dh)
+        #         present_key   = keys.transpose(1, 2).to(torch.float16)
+        #         present_value = values.transpose(1, 2).to(torch.float16)
+        #         return context_vec, present_key, present_value
+        #     else:
+        #         return context_vec, None, None
+
         # Compute the scaled dot-product attention scores,
         # The attention scores are computed by taking the dot product of the queries and keys.
         # The attention scores are then scaled by the square root of the head dimension.

@@ -24,6 +24,8 @@ class OpalDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.stride = stride
+        # Important: keep dataset tensors on CPU. DataLoader(pin_memory=True)
+        # only works with CPU tensors; we move to CUDA/MPS in the training loop.
         self.device = TRAINING_CONFIG["device"]
 
         # Prepare token chunks (handles both raw text and token IDs)
@@ -55,8 +57,8 @@ class OpalDataset(Dataset):
             input_chunk = token_ids[i : i + self.max_length]
             target_chunk = token_ids[i + 1 : i + self.max_length + 1]
 
-            input_chunks.append(torch.tensor(input_chunk, dtype=torch.long, device=self.device))
-            target_chunks.append(torch.tensor(target_chunk, dtype=torch.long, device=self.device))
+            input_chunks.append(torch.tensor(input_chunk, dtype=torch.long))
+            target_chunks.append(torch.tensor(target_chunk, dtype=torch.long))
 
         return input_chunks, target_chunks
 
