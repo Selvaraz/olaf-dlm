@@ -82,10 +82,10 @@ _GPT_CONFIG_OPAL_20M = {
     "transformer_drop_rate": 0.1,
     "attention_drop_rate": 0.1,
     "qkv_bias": False,
-    "num_epoch": 10,
-    "learning_rate": 3e-4,
+    "num_epoch": 4,
+    "learning_rate": 4e-4,
     "weight_decay": 0.1,
-    "early_stopping_patience": 6,
+    "early_stopping_patience": 2,
     "persistent_workers": False,
     "gradient_accumulation_steps": 1,  # ✅ Add explicitly
     "max_grad_norm": 1.0,               # ✅ Add gradient clipping

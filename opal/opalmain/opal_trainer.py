@@ -123,7 +123,7 @@ class Opal:
     def createOpalDataLoader(
         self,
         txt: str,
-        batch_size: int = None,
+        batch_size: int = TRAINING_CONFIG["batch_size"],
         max_length: int = 1280,
         stride: int = 256,
         shuffle: bool = True,
