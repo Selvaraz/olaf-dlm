@@ -26,7 +26,10 @@ class OpalFinetuneDataset(Dataset):
 
             prompt = item["prompt"].strip()
             # Convert entire response object to a compact JSON string
-            response_text = json.dumps(item["response"], ensure_ascii=False).strip()
+            if isinstance(item["response"], str):
+                response_text = item["response"].strip()
+            else:
+                response_text = json.dumps(item["response"], ensure_ascii=False).strip()
 
             # Validate minimum length
             if len(prompt) < 5:

@@ -530,8 +530,9 @@ class Opal:
                 tokens_seen += input_ids.numel()
                 global_step += 1
 
-                # Optional evaluation step
-                if global_step % eval_freq == 0:
+                # Optional evaluation step - 🔧 FIXED: Less frequent evaluation
+                eval_frequency = eval_freq if not self.is_finetune else max(eval_freq * 4, 100)  # Less frequent for fine-tuning
+                if global_step % eval_frequency == 0 and global_step > 0:  # Skip first step evaluation
                     train_loss, val_loss = self.evaluate_model(
                         model, train_loader, val_loader, device, eval_iter)
                     train_losses.append(train_loss)
@@ -542,14 +543,14 @@ class Opal:
                     # ✅ Early Stopping Logic (best val loss updated here)
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
-                        print(f"🔥 New best val_loss {val_loss:.3f}! Saving temporary checkpoint...")
+                        print(f"🔥 New best val_loss {val_loss:.6f}! Saving temporary checkpoint...")
                         self.save_model_checkpoint(
                             self.config, model, optimizer, scheduler,
                             epoch, train_losses, val_losses,
                             tokenizer_model=OpalConstants.TOKENIZER_MODEL_PATH
                         )
                     else:
-                        print(f"⚠️ No improvement at this evaluation")
+                        print(f"⚠️ No improvement at this evaluation (current: {val_loss:.6f}, best: {best_val_loss:.6f})")
 
                     #Calculate tokens/sec
                     elapsed = time.time() - start_time
@@ -560,7 +561,7 @@ class Opal:
                     gpu_mem_mb = get_gpu_memory_allocated_size() / (1024 * 1024) if get_gpu_memory_allocated_size() > 0 else 0
                     
                     print(f"Ep {epoch+1} (Step {global_step+1:06d}/{total_steps:06d}): "
-                        f"Train loss {train_loss:.3f}, Val loss {val_loss:.3f}, "
+                        f"Train loss {train_loss:.6f}, Val loss {val_loss:.6f}, "
                         f"CPU mem {cpu_mem_mb:.2f} MB, GPU mem {gpu_mem_mb:.2f} MB, "
                         f"Tokens/sec {tokens_per_sec:.2f}")
 
@@ -1157,19 +1158,39 @@ class Opal:
 
             print(f"-- Fine-tuning with {finetune_data_path}")
             
-            # Load data once and split it
+            # 🔧 FIXED: Load data once and split PROPERLY (avoid data leakage)
             with open(finetune_data_path, "r", encoding="utf-8") as f:
                 all_data = []
-                for line in f:
+                for line_num, line in enumerate(f, 1):
                     try:
-                        all_data.append(json.loads(line.strip()))
+                        data_item = json.loads(line.strip())
+                        # 🔧 Add validation for required fields
+                        if "prompt" not in data_item or "response" not in data_item:
+                            print(f"⚠ Skipping invalid JSONL line {line_num}: missing prompt/response")
+                            continue
+                        all_data.append(data_item)
                     except json.JSONDecodeError:
-                        print(f"⚠ Skipping malformed JSONL line: {line[:50]}...")
+                        print(f"⚠ Skipping malformed JSONL line {line_num}: {line[:50]}...")
     
-            # Split data for training and validation
+            if len(all_data) == 0:
+                raise ValueError("No valid training data found in JSONL file")
+                
+            print(f"📊 Loaded {len(all_data)} valid samples from {finetune_data_path}")
+            
+            # 🔧 FIXED: Use deterministic split with shuffle to prevent data leakage
+            import random
+            random.seed(42)  # Deterministic split
+            random.shuffle(all_data)  # Shuffle before split
+            
             split_idx = int(train_ratio * len(all_data))
             train_data = all_data[:split_idx]
             val_data = all_data[split_idx:]
+            
+            print(f"📊 Data split: {len(train_data)} train, {len(val_data)} validation samples")
+            
+            # 🔧 Ensure validation set is not too small
+            if len(val_data) < 100:
+                print(f"⚠️ WARNING: Validation set very small ({len(val_data)} samples). Consider larger dataset or different split ratio.")
     
             # Create temporary files for split data
             import tempfile
