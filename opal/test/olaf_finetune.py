@@ -5,12 +5,13 @@ from ..transformer.OpalGPTModel import OpalGPT
 from ..opalmain.opal_trainer import Opal
 from ..utils.opal_constants import OpalConstants
 from ..utils.training_utils import estimate_training_time_from_config
-from ..config.opal_config import OPAL_MODEL_CONFIG, TRAINING_CONFIG
+from ..config.opal_config import OPAL_MODEL_CONFIG, TRAINING_CONFIG, set_finetune_mode
 import torch
 import time
 import multiprocessing
 import shutil
 
+set_finetune_mode(enable_finetune=True)
 # Load SentencePiece tokenizer
 sp = spm.SentencePieceProcessor()
 sp.load(OpalConstants.TOKENIZER_MODEL_PATH)
@@ -22,6 +23,23 @@ device = TRAINING_CONFIG["device"]
 
 def model_pretrain_test(start_fresh=False):
     VOCAB_SIZE = sp.get_piece_size()
+
+
+    print("OPAL_MODEL_CONFIG FINETUNE:")
+    print("=" * 50)
+    print("{:<25} {:<25}".format("Key", "Value"))
+    print("-" * 50)
+    for key, value in OPAL_MODEL_CONFIG.items():
+        print("{:<25} {:<25}".format(str(key), str(value)))
+
+    print("\n\nOPAL FINE TUNING HYPER PARAMETERS:")
+    print("=" * 50)
+    print("{:<25} {:<25}".format("Key", "Value"))
+    print("-" * 50)
+    for key, value in TRAINING_CONFIG.items():
+        print("{:<25} {:<25}".format(str(key), str(value)))
+
+    print("\n\n")
 
     if (VOCAB_SIZE != OPAL_MODEL_CONFIG["vocab_size"]):
         raise ValueError("Vocabulary size mismatch between tokenizer and model")

@@ -23,6 +23,23 @@ device = TRAINING_CONFIG["device"]
 def model_pretrain_test(start_fresh=False):
     VOCAB_SIZE = sp.get_piece_size()
 
+    print("OPAL_MODEL_CONFIG:")
+    print("=" * 50)
+    print("{:<25} {:<25}".format("Key", "Value"))
+    print("-" * 50)
+    for key, value in OPAL_MODEL_CONFIG.items():
+        print("{:<25} {:<25}".format(str(key), str(value)))
+
+
+    print("\n\nOPAL TRAINING HYPER PARAMETERS:")
+    print("=" * 50)
+    print("{:<25} {:<25}".format("Key", "Value"))
+    print("-" * 50)
+    for key, value in TRAINING_CONFIG.items():
+        print("{:<25} {:<25}".format(str(key), str(value)))
+
+    print("\n\n")
+
     if (VOCAB_SIZE != OPAL_MODEL_CONFIG["vocab_size"]):
         raise ValueError("Vocabulary size mismatch between tokenizer and model")
 

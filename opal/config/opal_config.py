@@ -64,12 +64,17 @@ _GPT_CONFIG_OPAL_FINETUNE_8M = {
     "transformer_drop_rate": 0.05,
     "attention_drop_rate": 0.05,
 
-    # 🔹 Fine-tuning Hyperparameters
-    "num_epoch": 8,                   # ✅ Fewer epochs to prevent overfitting
-    "learning_rate": 3e-5,            # ✅ Slightly higher for better adaptation
-    "weight_decay": 0.05,
+    # 🔹 Fine-tuning Hyperparameters - Optimized for smaller model
+    "num_epoch": 6,                   # ✅ Slightly more epochs for smaller model
+    "learning_rate": 3e-5,            # ✅ Can handle slightly higher LR
+    "weight_decay": 0.01,             # ✅ Reduced weight decay
     "early_stopping_patience": 3,
-    "gradient_accumulation_steps": 2, # ✅ Useful if GPU memory is low
+    "gradient_accumulation_steps": 2, 
+    "max_grad_norm": 0.5,             # ✅ Add gradient clipping
+    
+    # 🔹 Fine-tuning specific settings
+    "warmup_steps": 50,               # ✅ Less warmup for smaller model
+    "lr_scheduler": "cosine",
 }
 
 _GPT_CONFIG_OPAL_20M = {
@@ -82,8 +87,8 @@ _GPT_CONFIG_OPAL_20M = {
     "transformer_drop_rate": 0.1,
     "attention_drop_rate": 0.1,
     "qkv_bias": False,
-    "num_epoch": 4,
-    "learning_rate": 4e-4,
+    "num_epoch": 3,
+    "learning_rate": 8e-4,
     "weight_decay": 0.1,
     "early_stopping_patience": 2,
     "persistent_workers": False,
@@ -96,16 +101,21 @@ _GPT_CONFIG_OPAL_20M = {
 
 _GPT_CONFIG_OPAL_FINETUNE_20M = {
     **_GPT_CONFIG_OPAL_20M,
-    "drop_rate": 0.05,
-    "transformer_drop_rate": 0.05,
+    "drop_rate": 0.05,               # ✅ Lower dropout for fine-tuning
+    "transformer_drop_rate": 0.05,   
     "attention_drop_rate": 0.05,
 
-    # 🔹 Fine-tuning Hyperparameters
-    "num_epoch": 8,                   # ✅ Fewer epochs to prevent overfitting
-    "learning_rate": 3e-5,            # ✅ Slightly higher for better adaptation
-    "weight_decay": 0.05,
-    "early_stopping_patience": 3,
-    "gradient_accumulation_steps": 2, # ✅ Useful if GPU memory is low
+    # 🔹 Fine-tuning Hyperparameters - Optimized for 100K dataset
+    "num_epoch": 5,                   # ✅ Reduced to prevent overfitting on large dataset
+    "learning_rate": 2e-5,            # ✅ Lower LR for stable fine-tuning
+    "weight_decay": 0.01,             # ✅ Reduced weight decay
+    "early_stopping_patience": 2,     # ✅ Earlier stopping for large dataset
+    "gradient_accumulation_steps": 4, # ✅ Higher accumulation for effective larger batch
+    "max_grad_norm": 0.5,             # ✅ Tighter gradient clipping for stability
+    
+    # 🔹 Fine-tuning specific settings
+    "warmup_steps": 100,              # ✅ Warmup for stable training start
+    "lr_scheduler": "cosine",         # ✅ Cosine annealing for fine-tuning
 }
 
 
@@ -176,15 +186,56 @@ _TRAINING_CONFIG_CPU = {
 }
 
 
+def set_finetune_mode(enable_finetune=True):
+    """
+    Helper function to switch between pretraining and fine-tuning configurations
+    
+    Args:
+        enable_finetune (bool): If True, use fine-tuning configs; otherwise pretraining
+    """
+    global OPAL_MODEL_CONFIG, TRAINING_CONFIG, FINETUNE_MODE
+    
+    FINETUNE_MODE = enable_finetune
+    USE_GPU = is_gpu_available()
+    
+    if FINETUNE_MODE:
+        print("🔧 Switching to FINE-TUNING configuration...")
+        OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_FINETUNE_20M
+        TRAINING_CONFIG = {
+            **(_TRAINING_CONFIG_GPU if USE_GPU else _TRAINING_CONFIG_CPU),
+            "batch_size": 16 if USE_GPU else 4,
+        }
+        print(f"   → Model: {OPAL_MODEL_CONFIG['emb_dim']}D, LR: {OPAL_MODEL_CONFIG['learning_rate']}")
+        print(f"   → Batch size: {TRAINING_CONFIG['batch_size']}, Epochs: {OPAL_MODEL_CONFIG['num_epoch']}")
+    else:
+        print("🚀 Switching to PRETRAINING configuration...")
+        OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_20M
+        TRAINING_CONFIG = _TRAINING_CONFIG_GPU if USE_GPU else _TRAINING_CONFIG_CPU
+        print(f"   → Model: {OPAL_MODEL_CONFIG['emb_dim']}D, LR: {OPAL_MODEL_CONFIG['learning_rate']}")
+        print(f"   → Batch size: {TRAINING_CONFIG['batch_size']}, Epochs: {OPAL_MODEL_CONFIG['num_epoch']}")
+
+
 # -----------------------------
 # Select Environment
 # -----------------------------
 
 USE_GPU = is_gpu_available()  # Change this if you want to force CPU/GPU
 
-#OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_GPU_8M if USE_GPU else _GPT_CONFIG_OPAL_CPU_8M
-OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_20M
-TRAINING_CONFIG = _TRAINING_CONFIG_GPU if USE_GPU else _TRAINING_CONFIG_CPU
+# Configuration selection - set FINETUNE_MODE=True when fine-tuning
+FINETUNE_MODE = False  # ✅ Set this to True when fine-tuning
+
+if FINETUNE_MODE:
+    # Use fine-tuning optimized configs
+    OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_FINETUNE_20M
+    # Reduce batch size for fine-tuning to prevent overfitting
+    TRAINING_CONFIG = {
+        **(_TRAINING_CONFIG_GPU if USE_GPU else _TRAINING_CONFIG_CPU),
+        "batch_size": 16 if USE_GPU else 4,  # Smaller batches for fine-tuning
+    }
+else:
+    # Use pretraining configs
+    OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_20M
+    TRAINING_CONFIG = _TRAINING_CONFIG_GPU if USE_GPU else _TRAINING_CONFIG_CPU
 
 
 # ---- Small-model efficiency flags (defaults) ----
