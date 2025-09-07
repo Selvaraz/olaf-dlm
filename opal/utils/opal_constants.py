@@ -3,7 +3,8 @@ class OpalConstants:
     """Class to hold all constants used in Opal"""
 
     # RUNTIME PATHS
-    SYSTEM_ROOT_PATH = "/Users/selvmani/OLAF/workspace/runtime"
+    #SYSTEM_ROOT_PATH = "/Users/selvmani/OLAF/workspace/runtime"
+    SYSTEM_ROOT_PATH= ""
     RUNTIME_ROOT_PATH = f"{SYSTEM_ROOT_PATH}/workspace"
     CHECKPOINT_DIR = f"{RUNTIME_ROOT_PATH}/checkpoints"
     TENSORBOARD_RUN_DIR = f"{CHECKPOINT_DIR}/runs"
