@@ -5,11 +5,27 @@ from pathlib import Path
 
 count = 0
 
+excluded_sections = [
+    "Command",
+    "Description",
+    "Syntax Description",
+    "Specifies",
+    "Note",
+    "Command History",
+    "Modification",
+    "Release",
+    "introduced",
+    "Examples",
+    "Related Commands",
+
+]
+
 def extract_text_blocks(pdf_path: Path, debug=False):
     """Extract headings, bullets, CLI commands, and normal text lines from a PDF using fitz."""
     text_blocks = []
     try:
         doc = fitz.open(pdf_path)
+        section_started = False
         for page_num, page in enumerate(doc):
             try:
                 lines = page.get_text("text").split("\n")
@@ -25,8 +41,13 @@ def extract_text_blocks(pdf_path: Path, debug=False):
                         print(f"Page {page_num + 1}: Processing line: '{line_clean}'")
 
                     # Detect headings (shorter, capitalized text with punctuation)
-                    if re.match(r"^[A-Z][A-Za-z0-9\s\-\:\/.]{2,}$", line_clean) and len(line_clean.split()) <= 8:
-                        section_tag = f"<SECTION>{line_clean}</SECTION>"
+                    if re.match(r"^[A-Z][A-Za-z0-9\s\-\:\/.]{2,}$", line_clean) and len(line_clean.split()) <= 8 :
+                        if section_started:
+                            section_tag = "\n" + "</SECTION>\n"
+                        
+                        section_tag = f"<SECTION>\n{line_clean}"
+
+                        section_started = True
                         if debug:
                             global count
                             count += 1
@@ -37,7 +58,7 @@ def extract_text_blocks(pdf_path: Path, debug=False):
                     # Detect bullets
                     elif re.match(r"^[•\-\*]\s+.*", line_clean):
                         bullet_text = re.sub(r"^[•\-\*]\s*", "", line_clean)
-                        bullet_tag = f"<BULLET>{bullet_text}</BULLET>"
+                        bullet_tag = f"- {bullet_text}"
                         if debug:
                             print(f"  -> BULLET: {bullet_tag}")
                         text_blocks.append(bullet_tag)

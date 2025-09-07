@@ -1,5 +1,6 @@
 import torch
 import argparse
+import os
 import sentencepiece as spm
 from ..transformer.OpalGPTModel import OpalGPT
 from ..opalmain.opal_trainer import Opal
@@ -16,7 +17,7 @@ set_finetune_mode(enable_finetune=True)
 sp = spm.SentencePieceProcessor()
 sp.load(OpalConstants.TOKENIZER_MODEL_PATH)
 # Create Opal instance with tokenizer
-opalInstance = Opal(config=OPAL_MODEL_CONFIG, tokenizer=sp, is_finetune=True, finetune_data_path=OpalConstants.FINETUNE_DATA_PATH)
+opalInstance = Opal(config=OPAL_MODEL_CONFIG, tokenizer=sp, is_finetune=True, finetune_data_path=OpalConstants.FINETUNE_TEST_DATA_PATH)
 torch.manual_seed(123)
 
 device = TRAINING_CONFIG["device"]
@@ -24,15 +25,24 @@ device = TRAINING_CONFIG["device"]
 def model_pretrain_test(start_fresh=False):
     VOCAB_SIZE = sp.get_piece_size()
 
+    # Debug checkpoint path
+    print(f"🔍 Checkpoint path: {OpalConstants.CHECKPOINT_PATH}")
+    print(f"🔍 File exists: {os.path.exists(OpalConstants.CHECKPOINT_PATH)}")
+    print(f"🔍 Is file: {os.path.isfile(OpalConstants.CHECKPOINT_PATH)}")
+    print(f"🔍 Real path: {os.path.realpath(OpalConstants.CHECKPOINT_PATH)}")
+    print(f"🔍 Real path exists: {os.path.isfile(os.path.realpath(OpalConstants.CHECKPOINT_PATH))}")
 
-    print("OPAL_MODEL_CONFIG FINETUNE:")
+    # Re-import the configs after calling set_finetune_mode()
+    from ..config.opal_config import OPAL_MODEL_CONFIG, TRAINING_CONFIG
+    
+    print("UPDATED OPAL_MODEL_CONFIG FINETUNE:")
     print("=" * 50)
     print("{:<25} {:<25}".format("Key", "Value"))
     print("-" * 50)
     for key, value in OPAL_MODEL_CONFIG.items():
         print("{:<25} {:<25}".format(str(key), str(value)))
 
-    print("\n\nOPAL FINE TUNING HYPER PARAMETERS:")
+    print("\n\nUPDATED OPAL FINE TUNING HYPER PARAMETERS:")
     print("=" * 50)
     print("{:<25} {:<25}".format("Key", "Value"))
     print("-" * 50)
