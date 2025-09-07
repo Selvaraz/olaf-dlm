@@ -221,7 +221,11 @@ def train_tokenizer(
         "class-map",
         "logging",
         "sxp",
-        "routing"
+        "routing",
+        "monitor",
+        "capture",
+        "pcap",
+        "sipcap"
     ]),
 ):
     logging.info(f"Starting tokenizer training...")
