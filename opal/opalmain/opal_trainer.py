@@ -10,10 +10,10 @@ import psutil
 from opal.dataloader.OpalFileDataSet import OpalFileDataset
 import torch
 import math
-import git
 from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+from typing import List
 from ..dataloader.OpalDataSet import OpalDataset
 from ..dataloader.OpalFineTuneDataSet import OpalFinetuneDataset
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -375,7 +375,8 @@ class Opal:
             str: The content of the text file as a string.
         """
         txt = None
-    
+
+        import git
         repo = git.Repo(os.path.dirname(os.path.realpath(__file__)), search_parent_directories=True)
         repo_dir = Path(repo.git.rev_parse("--show-toplevel"))
 
