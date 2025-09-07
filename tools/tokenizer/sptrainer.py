@@ -194,7 +194,6 @@ def train_tokenizer(
         "interface",
         "trunk",
         "vlan",
-        "spanning-tree",
         "lacp",
         "802.1X",
         "STP",
