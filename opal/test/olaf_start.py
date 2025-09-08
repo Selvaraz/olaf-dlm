@@ -48,7 +48,7 @@ def model_pretrain_test(start_fresh=False):
         config=OPAL_MODEL_CONFIG,
         device=device,
         tokenizer=sp,
-        corpus_text=opalInstance.loadTrainingData(token_model=OpalConstants.TOKENIZER_MODEL_PATH),
+        # corpus_text=opalInstance.loadTrainingData(token_model=OpalConstants.TOKENIZER_MODEL_PATH),
         checkpoint_path=OpalConstants.CHECKPOINT_PATH,
         num_epochs=OPAL_MODEL_CONFIG["num_epoch"],
         log_to_tensorboard=True,

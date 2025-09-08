@@ -140,7 +140,7 @@ class Opal:
 
         # Set batch size
         if batch_size is None:
-            batch_size = TRAINING_CONFIG.get("batch_size", 4)
+            batch_size = TRAINING_CONFIG.get("batch_size", 8)
 
         print(f"✅ Creating Fine-tune DataLoader → batch_size={batch_size}, shuffle={shuffle}, workers={num_workers}")
 
@@ -158,19 +158,19 @@ class Opal:
     def createOpalDataLoader(self, dataset: Dataset, **kwargs):
         return DataLoader(
             dataset,
-            batch_size=self.config["batch_size"],
+            batch_size=TRAINING_CONFIG.get("batch_size", 8),
             shuffle=kwargs.get("shuffle", True),
             drop_last=kwargs.get("drop_last", True),
-            num_workers=self.config["num_workers"],
+            num_workers=TRAINING_CONFIG.get("num_workers", 0),
             pin_memory=True, 
             persistent_workers=self.config["persistent_workers"],
-            prefetch_factor= 4 if self.config["num_workers"] > 0 else None
+            prefetch_factor= 4 if TRAINING_CONFIG.get("num_workers", 0) > 0 else None
         )
     
     def __createOpal_DataLoader__(
         self,
         filepaths: List[str],
-        batch_size: int = TRAINING_CONFIG["batch_size"],
+        batch_size: int = TRAINING_CONFIG.get("batch_size", 8),
         max_length: int = 1280,
         stride: int = 256,
         shuffle: bool = True,
@@ -529,9 +529,9 @@ class Opal:
 
         return idx
 
-    def train_model_simple(self, model, optimizer, scheduler, device, num_epochs,
+    def train_model_simple(self, model, optimizer, device, num_epochs,
                         eval_freq, eval_iter, start_context, tokenizer,
-                        writer=None, log_to_wandb=False):
+                        writer=None, log_to_wandb=False, scheduler_state_dict=None):
         # Initialize lists to track losses and tokens seen
         train_losses, val_losses, track_tokens_seen = [], [], []
         train_perplexities, val_perplexities = [], []
@@ -588,31 +588,58 @@ class Opal:
                 generator=torch.Generator().manual_seed(42) # for reproducibility
             )
 
+        print("✅ Creatig the training dataloader")
         # 5. Create DataLoaders from the subsets
         train_loader = DataLoader(
             train_dataset,
-            batch_size=self.config["batch_size"],
+            batch_size=TRAINING_CONFIG.get("batch_size", 8),
             shuffle=True,
             drop_last=True,
-            num_workers=self.config["num_workers"],
+            num_workers=TRAINING_CONFIG.get("num_workers", 0),
             pin_memory=True, 
             persistent_workers=self.config["persistent_workers"],
-            prefetch_factor= 4 if self.config["num_workers"] > 0 else None
+            prefetch_factor= 4 if TRAINING_CONFIG.get("num_workers", 0) > 0 else None
         )
+        print("✅ Creatig the training value dataloader")
         val_loader = DataLoader(
             val_dataset,
-            batch_size=self.config["batch_size"],
+            batch_size=TRAINING_CONFIG.get("batch_size", 8),
             shuffle=False,
             drop_last=True,
-            num_workers=self.config["num_workers"],
+            num_workers=TRAINING_CONFIG.get("num_workers", 0),
             pin_memory=True, 
             persistent_workers=self.config["persistent_workers"],
-            prefetch_factor= 4 if self.config["num_workers"] > 0 else None
+            prefetch_factor= 4 if TRAINING_CONFIG.get("num_workers", 0) > 0 else None
         )
+
+               # ----------------------------------------
+        # Scheduler with Warmup + CosineAnnealingLR  #Finetune-Optional
+        # ----------------------------------------
+        total_steps = num_epochs * len(train_loader)
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=total_steps
+        )
+
+        print(f"✅ Total steps for the training loader: {total_steps} ")
+        warmup_steps = total_steps * 0.05
+        def lr_lambda(step):
+            if step < warmup_steps:
+                return float(step) / float(max(1, warmup_steps))
+            return 1.0
+
+        print("✅ Created learning rate scheduler")
+        warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+        if scheduler_state_dict:
+            cosine_scheduler.load_state_dict(scheduler_state_dict)
+
+        scheduler = cosine_scheduler
 
         print(f"✅ Created training and validation data loaders.")
         print(f"✅ Training with {len(train_dataset)} chunks, validating with {len(val_dataset)} chunks.")
         
+        model.eval()
+        self.generate_with_topk(model, tokenizer, device, start_context, 100)
         # Main training loop
         for epoch in range(num_epochs):
             model.train()  # Set model to training mode
@@ -625,7 +652,7 @@ class Opal:
                 
                 with torch.cuda.amp.autocast(enabled=TRAINING_CONFIG["mixed_precision"]):
                     outputs = model(input_ids, labels=targets)
-                    loss = outputs.loss
+                    loss = outputs["loss"]
                 
                 if scaler:
                     scaler.scale(loss).backward()
@@ -738,11 +765,11 @@ class Opal:
                                       eos_id=tokenizer.eos_id(),
                                       repetition_penalty=1.2)
             decoded_text = self.token_ids_to_text(token_ids)
-            print("\n")
-            print("==========================================")
+            print("\n\n")
+            print("==========================================\n")
             print(decoded_text.replace("\n", " "))  # Compact print format
-            print("==========================================")
-            print("\n")
+            print("\n==========================================")
+            print("\n\n")
         model.train()
 
             
@@ -1406,24 +1433,24 @@ class Opal:
         #             num_workers=TRAINING_CONFIG["num_workers"],
         #         )
 
-        # ----------------------------------------
-        # Scheduler with Warmup + CosineAnnealingLR  #Finetune-Optional
-        # ----------------------------------------
-        total_steps = num_epochs * len(training_loader)
-        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=total_steps
-        )
+        # # ----------------------------------------
+        # # Scheduler with Warmup + CosineAnnealingLR  #Finetune-Optional
+        # # ----------------------------------------
+        # total_steps = num_epochs * len(training_loader)
+        # cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        #     optimizer, T_max=total_steps
+        # )
 
-        def lr_lambda(step):
-            if step < config.get("warmup_steps", 0):
-                return float(step) / float(max(1, config["warmup_steps"]))
-            return 1.0
+        # def lr_lambda(step):
+        #     if step < config.get("warmup_steps", 0):
+        #         return float(step) / float(max(1, config["warmup_steps"]))
+        #     return 1.0
 
-        print("✅ Created learning rate scheduler")
-        warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        # print("✅ Created learning rate scheduler")
+        # warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-        if scheduler_state_dict:
-            cosine_scheduler.load_state_dict(scheduler_state_dict)
+        # if scheduler_state_dict:
+        #     cosine_scheduler.load_state_dict(scheduler_state_dict)
 
         # ----------------------------------------
         # Training Loop
@@ -1464,7 +1491,7 @@ class Opal:
         train_losses, val_losses, tokens_seen, train_perplexities, val_perplexities = self.train_model_simple(
             model=model,
             optimizer=optimizer,
-            scheduler=cosine_scheduler,
+            # scheduler=cosine_scheduler,
             device=device,
             num_epochs=num_epochs,
             eval_freq=eval_freq,
@@ -1472,7 +1499,8 @@ class Opal:
             start_context=start_context,
             tokenizer=tokenizer,
             writer=writer,
-            log_to_wandb=log_to_wandb
+            log_to_wandb=log_to_wandb,
+            scheduler_state_dict=scheduler_state_dict
         )
         # Save final checkpoint
         print("✅ Saving final checkpoint")

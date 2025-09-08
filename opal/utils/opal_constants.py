@@ -3,8 +3,8 @@ class OpalConstants:
     """Class to hold all constants used in Opal"""
 
     # RUNTIME PATHS
-    #SYSTEM_ROOT_PATH = "/Users/selvmani/OLAF/workspace/runtime"
-    SYSTEM_ROOT_PATH= ""
+    SYSTEM_ROOT_PATH = "/home/selvaraj/"
+    #SYSTEM_ROOT_PATH= ""
     RUNTIME_ROOT_PATH = f"{SYSTEM_ROOT_PATH}/workspace"
     CHECKPOINT_DIR = f"{RUNTIME_ROOT_PATH}/checkpoints"
     TENSORBOARD_RUN_DIR = f"{CHECKPOINT_DIR}/runs"
@@ -13,8 +13,8 @@ class OpalConstants:
 
     ## INPUTS
     DATA_DIR = f"{RUNTIME_ROOT_PATH}/dataset"
-    PRETRAIN_DATA_PATH = f"{DATA_DIR}/corpus_olaf.txt"
-    TOKENIZER_MODEL_PATH = f"{RUNTIME_ROOT_PATH}/tokenizer/olaf_tokenizer_0815.model"
+    PRETRAIN_DATA_PATH = f"{DATA_DIR}/consolidated_ascii_files"
+    TOKENIZER_MODEL_PATH = f"{RUNTIME_ROOT_PATH}/tokenizer/olaf_tokenizer_09062025_45M.model"
     FINETUNE_DATA_PATH = f"{DATA_DIR}/QA_finetune_final.jsonl"
 
     
