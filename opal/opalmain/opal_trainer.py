@@ -536,8 +536,11 @@ class Opal:
                 # Backpropagation with or without mixed precision
                 if TRAINING_CONFIG["mixed_precision"]:
                     scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
                 else:
                     loss.backward()
+                    optimizer.step()
 
                 # Calculate gradient norm before clipping
                 total_norm = 0.0
