@@ -108,10 +108,10 @@ _GPT_CONFIG_OPAL_GPU_45M = {
 
 _TRAINING_CONFIG_GPU = {
     "device": get_device(),
-    "batch_size": 16,
-    "num_workers": 0,
-    "mixed_precision": False,  # 🔧 Disable mixed precision for MPS compatibility
-    "gradient_accumulation_steps": 1
+    "batch_size": 32,
+    "num_workers": 8,
+    "mixed_precision": True, 
+    "gradient_accumulation_steps": 2
 }
 
 

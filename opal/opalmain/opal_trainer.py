@@ -595,10 +595,10 @@ class Opal:
             batch_size=TRAINING_CONFIG.get("batch_size", 8),
             shuffle=True,
             drop_last=True,
-            num_workers=TRAINING_CONFIG.get("num_workers", 0),
+            num_workers=TRAINING_CONFIG.get("num_workers", 4),  # Increased for file-based dataset
             pin_memory=True, 
             persistent_workers=self.config["persistent_workers"],
-            prefetch_factor= 4 if TRAINING_CONFIG.get("num_workers", 0) > 0 else None
+            prefetch_factor= 8 if TRAINING_CONFIG.get("num_workers", 0) > 0 else None  # Increased prefetch
         )
         print("✅ Creatig the training value dataloader")
         val_loader = DataLoader(
@@ -606,10 +606,10 @@ class Opal:
             batch_size=TRAINING_CONFIG.get("batch_size", 8),
             shuffle=False,
             drop_last=True,
-            num_workers=TRAINING_CONFIG.get("num_workers", 0),
+            num_workers=TRAINING_CONFIG.get("num_workers", 4),  # Increased for file-based dataset
             pin_memory=True, 
             persistent_workers=self.config["persistent_workers"],
-            prefetch_factor= 4 if TRAINING_CONFIG.get("num_workers", 0) > 0 else None
+            prefetch_factor= 8 if TRAINING_CONFIG.get("num_workers", 0) > 0 else None  # Increased prefetch
         )
 
                # ----------------------------------------

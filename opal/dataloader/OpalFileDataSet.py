@@ -1,7 +1,7 @@
 import os
 import torch
 from torch.utils.data import Dataset
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 from opal.config.opal_config import TRAINING_CONFIG
 
 class OpalFileDataset(Dataset):
@@ -21,6 +21,10 @@ class OpalFileDataset(Dataset):
         self.max_length = max_length
         self.stride = stride
         self.device = TRAINING_CONFIG["device"]
+        
+        # Cache for loaded files to avoid repeated I/O
+        self._file_cache: Dict[str, torch.Tensor] = {}
+        self._cache_size_limit = 10  # Keep max 10 files in memory
         
         # We now create a mapping from chunk index to (file_idx, start_offset)
         # based on the lengths of the pre-tokenized files.
@@ -54,14 +58,26 @@ class OpalFileDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Loads a specific chunk from a pre-tokenized file.
+        Loads a specific chunk from a pre-tokenized file with caching.
         """
         # Get the mapping for the requested chunk index
         file_idx, start_offset = self._file_chunk_indices[idx]
         file_path = self.file_paths[file_idx]
 
-        # Load the pre-tokenized tensor for the specific file
-        token_ids = torch.load(file_path, map_location=self.device)
+        # Try to get from cache first
+        if file_path in self._file_cache:
+            token_ids = self._file_cache[file_path]
+        else:
+            # FIXED: Always load to CPU for DataLoader pin_memory compatibility
+            token_ids = torch.load(file_path, map_location='cpu')
+            
+            # Add to cache with size limit
+            if len(self._file_cache) >= self._cache_size_limit:
+                # Remove oldest entry (simple FIFO)
+                oldest_key = next(iter(self._file_cache))
+                del self._file_cache[oldest_key]
+            
+            self._file_cache[file_path] = token_ids
 
         # Extract the specific chunk based on the pre-calculated offsets
         input_chunk = token_ids[start_offset : start_offset + self.max_length].clone().detach()
