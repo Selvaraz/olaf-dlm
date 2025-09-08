@@ -464,7 +464,14 @@ class Opal:
         total_steps = num_epochs * len(train_loader)
         warmup_steps = int(total_steps * 0.05)  # 5% warmup
         
-        print(f"📊 Training setup: {total_steps} total steps, {warmup_steps} warmup steps")
+        print(f"� === TRAINING PIPELINE INITIALIZATION ===")
+        print(f"�📊 Training setup: {total_steps:,} total steps, {warmup_steps:,} warmup steps")
+        print(f"📊 Epochs: {num_epochs}, Batches per epoch: {len(train_loader):,}")
+        print(f"📊 Evaluation frequency: every {eval_freq} steps, {eval_iter} batches per eval")
+        print(f"📊 Early stopping patience: {early_stopping_patience} epochs")
+        print(f"📊 Mixed precision: {TRAINING_CONFIG['mixed_precision']}")
+        print(f"📊 Device: {device}")
+        print(f"🚀 ==========================================")
         
         # Create warmup scheduler
         def lr_lambda(step):
@@ -479,6 +486,11 @@ class Opal:
         # Main training loop
         for epoch in range(num_epochs):
             model.train()  # Set model to training mode
+            epoch_start_time = time.time()
+
+            print(f"\n🔄 === EPOCH {epoch+1}/{num_epochs} STARTING ===")
+            print(f"📊 Best validation loss so far: {best_val_loss:.6f}")
+            print(f"📊 Epochs without improvement: {epochs_no_improve}")
 
             # Create a progress bar for the training data
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
@@ -515,6 +527,12 @@ class Opal:
 
                 loss = self.calc_loss_batch(input_ids, targets, model, device)
 
+                # Safety check for NaN or infinite loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"🚨 WARNING: Loss became {'NaN' if torch.isnan(loss) else 'infinite'} at step {global_step+1}!")
+                    print(f"🚨 Skipping this batch and continuing training...")
+                    continue
+
                 # Backpropagation with or without mixed precision
                 if TRAINING_CONFIG["mixed_precision"]:
                     scaler.scale(loss).backward()
@@ -544,6 +562,13 @@ class Opal:
                 if global_step < warmup_steps:
                     # During warmup: use warmup scheduler
                     warmup_scheduler.step()
+                elif global_step == warmup_steps:
+                    # Transition point: log warmup completion
+                    current_lr = optimizer.param_groups[0]["lr"]
+                    print(f"\n🔥 WARMUP COMPLETED! Transitioning to cosine annealing at step {global_step+1}")
+                    print(f"🔥 Learning rate at warmup completion: {current_lr:.2e}")
+                    if scheduler:
+                        scheduler.step()
                 else:
                     # After warmup: use main scheduler (cosine annealing)
                     if scheduler:
@@ -551,6 +576,14 @@ class Opal:
 
                 tokens_seen += input_ids.numel()
                 global_step += 1
+
+                # Update progress bar with current loss
+                if hasattr(loss, 'item'):
+                    pbar.set_postfix({
+                        'loss': f'{loss.item():.4f}',
+                        'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
+                        'tokens': f'{tokens_seen:,}'
+                    })
 
                 # Optional evaluation step - 🔧 FIXED: Less frequent evaluation
                 eval_frequency = eval_freq if not self.is_finetune else max(eval_freq * 4, 100)  # Less frequent for fine-tuning
@@ -592,8 +625,8 @@ class Opal:
                     # Enhanced logging with warmup info and perplexity
                     warmup_status = f"Warmup {warmup_progress:.1%}" if global_step < warmup_steps else "Post-warmup"
                     print(f"Ep {epoch+1} (Step {global_step+1:06d}/{total_steps:06d}) {warmup_status}: "
-                        f"Train loss {train_loss:.6f} (Train Perplexity {train_perplexity:.2f}), "
-                        f"Val loss {val_loss:.6f} (Val Perplexity {val_perplexity:.2f}), "
+                        f"Train loss {train_loss:.6f} (PPL {train_perplexity:.2f}), "
+                        f"Val loss {val_loss:.6f} (PPL {val_perplexity:.2f}), "
                         f"LR {current_lr:.2e}, "
                         f"CPU mem {cpu_mem_mb:.2f} MB, GPU mem {gpu_mem_mb:.2f} MB, "
                         f"Tokens/sec {tokens_per_sec:.2f}")
@@ -629,14 +662,25 @@ class Opal:
                         })
 
             # ✅ After each epoch, check if val_loss improved in this epoch
+            epoch_duration = time.time() - epoch_start_time
+            
             if best_val_loss < epoch_best_val_loss:
                 epochs_no_improve = 0
+                improvement_msg = f"✅ Validation loss improved this epoch!"
             else:
                 epochs_no_improve += 1
-                print(f"⚠️ No improvement for {epochs_no_improve} epochs")
+                improvement_msg = f"⚠️ No improvement for {epochs_no_improve} epochs"
+            
+            print(f"\n🏁 === EPOCH {epoch+1}/{num_epochs} COMPLETED ===")
+            print(f"⏱️ Epoch duration: {epoch_duration:.2f} seconds")
+            print(f"📊 {improvement_msg}")
+            print(f"📊 Current best validation loss: {best_val_loss:.6f}")
 
             if epochs_no_improve >= early_stopping_patience:
-                print(f"⛔ Early stopping triggered after {early_stopping_patience} epochs!")
+                print(f"\n⛔ === EARLY STOPPING TRIGGERED ===")
+                print(f"⛔ No improvement for {early_stopping_patience} consecutive epochs!")
+                print(f"⛔ Final best validation loss: {best_val_loss:.6f}")
+                print(f"⛔ Training stopped at epoch {epoch+1}/{num_epochs}")
                 return train_losses, val_losses, track_tokens_seen
 
             # Print a sample text after each epoch
@@ -647,6 +691,13 @@ class Opal:
             self.generate_with_topk(
                 model, tokenizer, device, start_context, top_k=50
             )
+
+        print(f"\n🎉 === TRAINING COMPLETED SUCCESSFULLY ===")
+        print(f"🎉 All {num_epochs} epochs completed!")
+        print(f"🎉 Final best validation loss: {best_val_loss:.6f}")
+        print(f"🎉 Total training steps: {global_step+1:,}")
+        print(f"🎉 Total tokens processed: {tokens_seen:,}")
+        print(f"🎉 ========================================")
 
         return train_losses, val_losses, track_tokens_seen
 
