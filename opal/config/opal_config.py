@@ -37,27 +37,27 @@ def get_gpu_memory_allocated_size():
     return gpu_mem_mb
 
 
-_GPT_CONFIG_OPAL_20M = {
-    "vocab_size": 12000,
-    "context_length": 1024,       # ↑ for longer prompts
-    "emb_dim": 320,               # ↑ better token representations
-    "n_heads": 8,                 # scales well with emb_dim
-    "n_layers": 12,               # ↑ more reasoning depth
-    "drop_rate": 0.05,            # lower dropout for accuracy
-    "transformer_drop_rate": 0.1,
-    "attention_drop_rate": 0.1,
-    "qkv_bias": False,
-    "num_epoch": 3,
-    "learning_rate": 3e-4,
-    "weight_decay": 0.1,
-    "early_stopping_patience": 2,
-    "persistent_workers": False,
-    "gradient_accumulation_steps": 1,  # ✅ Add explicitly
-    "max_grad_norm": 1.0,               # ✅ Add gradient clipping
-    "kv_heads" : 1,                # MQA
-    "use_rope": True,              # Rotary pos embeddings
-    "tie_embeddings": True          # Tie input/output embeddings
-}
+# _GPT_CONFIG_OPAL_20M = {
+#     "vocab_size": 12000,
+#     "context_length": 1024,       # ↑ for longer prompts
+#     "emb_dim": 320,               # ↑ better token representations
+#     "n_heads": 8,                 # scales well with emb_dim
+#     "n_layers": 12,               # ↑ more reasoning depth
+#     "drop_rate": 0.05,            # lower dropout for accuracy
+#     "transformer_drop_rate": 0.1,
+#     "attention_drop_rate": 0.1,
+#     "qkv_bias": False,
+#     "num_epoch": 3,
+#     "learning_rate": 3e-4,
+#     "weight_decay": 0.1,
+#     "early_stopping_patience": 2,
+#     "persistent_workers": False,
+#     "gradient_accumulation_steps": 1,  # ✅ Add explicitly
+#     "max_grad_norm": 1.0,               # ✅ Add gradient clipping
+#     "kv_heads" : 1,                # MQA
+#     "use_rope": True,              # Rotary pos embeddings
+#     "tie_embeddings": True          # Tie input/output embeddings
+# }
 
 _GPT_CONFIG_OPAL_45M = {
     "vocab_size": 12000,

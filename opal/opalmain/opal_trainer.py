@@ -7,6 +7,9 @@ import time
 import os
 import shutil
 import psutil
+import git
+import tempfile
+import atexit
 from opal.dataloader.OpalFileDataSet import OpalFileDataset
 import torch
 import math
@@ -16,7 +19,7 @@ from matplotlib.ticker import MaxNLocator
 from typing import List
 from ..dataloader.OpalDataSet import OpalDataset
 from ..dataloader.OpalFineTuneDataSet import OpalFinetuneDataset
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 from ..utils.opal_constants import OpalConstants
 from ..export.export_onnx import export_and_quantize_model
 from opal.config.opal_config import TRAINING_CONFIG, get_gpu_memory_allocated_size, get_scaler
@@ -30,6 +33,7 @@ from torch.utils.tensorboard import SummaryWriter
 # For weights and biases logging
 import wandb
 
+
 class Opal:
     def __init__(self, config, tokenizer=None, 
                 start_fresh=False, is_finetune=False,
@@ -39,21 +43,6 @@ class Opal:
         self.start_fresh = start_fresh
         self.is_finetune = is_finetune
         self.finetune_data_path = finetune_data_path
-    
-    # GEMINI: New helper function to get all training file paths
-    def get_pretraining_file_paths(self) -> List[str]:
-        """
-        Retrieves a list of all pre-training file paths from the data directory.
-        """
-        data_dir = os.path.dirname(OpalConstants.PRETRAIN_DATA_PATH)
-        # Use glob to find all files that match the pattern in the data directory
-        file_paths = glob.glob(os.path.join(data_dir, "**/*"), recursive=True)
-        # Filter out directories and any non-data files if necessary
-        file_paths = [f for f in file_paths if os.path.isfile(f)]
-        if not file_paths:
-            raise ValueError(f"No training files found in directory: {data_dir}")
-        print(f"✅ Found {len(file_paths)} training files.")
-        return file_paths
     
     def collate_finetune(self, batch):
         """Return a tuple (input_ids, labels) to match the model's forward(input, labels) signature."""
@@ -75,23 +64,6 @@ class Opal:
             labels.append(padded_labels)
 
         return torch.stack(input_ids), torch.stack(labels)
-
-    def calculate_perplexity(self, loss):
-        """
-        Calculate perplexity from loss.
-        
-        Args:
-            loss (float): Cross-entropy loss value
-            
-        Returns:
-            float: Perplexity value (exp(loss))
-        """
-        if torch.is_tensor(loss):
-            loss = loss.item()
-        
-        # Clamp loss to prevent overflow in exp()
-        loss = min(loss, 50.0)  # exp(50) ≈ 5.18e21, reasonable upper bound
-        return torch.exp(torch.tensor(loss)).item()
 
     def createOpalFinetuneDataLoader(
         self,
@@ -140,7 +112,7 @@ class Opal:
 
         # Set batch size
         if batch_size is None:
-            batch_size = TRAINING_CONFIG.get("batch_size", 8)
+            batch_size = TRAINING_CONFIG.get("batch_size", 4)
 
         print(f"✅ Creating Fine-tune DataLoader → batch_size={batch_size}, shuffle={shuffle}, workers={num_workers}")
 
@@ -155,22 +127,10 @@ class Opal:
             collate_fn=self.collate_finetune
         )
 
-    def createOpalDataLoader(self, dataset: Dataset, **kwargs):
-        return DataLoader(
-            dataset,
-            batch_size=TRAINING_CONFIG.get("batch_size", 8),
-            shuffle=kwargs.get("shuffle", True),
-            drop_last=kwargs.get("drop_last", True),
-            num_workers=TRAINING_CONFIG.get("num_workers", 0),
-            pin_memory=True, 
-            persistent_workers=self.config["persistent_workers"],
-            prefetch_factor= 4 if TRAINING_CONFIG.get("num_workers", 0) > 0 else None
-        )
-    
-    def __createOpal_DataLoader__(
+    def createOpalDataLoader(
         self,
-        filepaths: List[str],
-        batch_size: int = TRAINING_CONFIG.get("batch_size", 8),
+        txt,  # Can be str or torch.Tensor 
+        batch_size: int = TRAINING_CONFIG["batch_size"],
         max_length: int = 1280,
         stride: int = 256,
         shuffle: bool = True,
@@ -182,7 +142,7 @@ class Opal:
         Creates a DataLoader for the OpalDataset using optimal settings based on CPU cores.
 
         Args:
-            txt (str): Raw input text.
+            txt (str or torch.Tensor): Raw input text or pretokenized tensor.
             batch_size (int, optional): If None, automatically set to 8 for >16 cores, else 4.
             max_length (int): Maximum token sequence length per sample.
             stride (int): Overlap between chunks.
@@ -202,28 +162,19 @@ class Opal:
         # Print out chosen parameters for transparency
         print(f"Creating DataLoader with {num_workers} workers, batch_size={batch_size}, prefetch_factor=4")
 
-        # Instantiate the new dataset class with the list of files
-        # The dataset will pre-calculate the total number of chunks across all files
-        dataset = OpalFileDataset(
-            file_paths=filepaths,
+        dataset = OpalDataset(
+            txt=txt,
             tokenizer=self.tokenizer,
-            max_length=self.config["context_length"],
-            stride=256,
-            device=self.config["device"]
+            max_length=max_length,
+            stride=stride,
+            device=device
         )
-        # dataset = OpalDataset(
-        #     txt=txt,
-        #     tokenizer=self.tokenizer,
-        #     max_length=max_length,
-        #     stride=stride,
-        #     device=device
-        # )
 
         # Use persistent_workers=True and prefetch_factor=4 to reduce worker startup overhead
         return DataLoader(
             dataset,
-            batch_size=TRAINING_CONFIG["batch_size"],
-            shuffle=True,
+            batch_size=batch_size,  # 🔧 FIXED: Use passed batch_size parameter, not config
+            shuffle=shuffle,
             drop_last=drop_last,
             num_workers=num_workers,
             pin_memory=True, 
@@ -241,33 +192,7 @@ class Opal:
 
     ##
 
-    def _pretokenize_corpus(self, raw_file_paths: List[str]):
-        """
-        Pre-tokenizes the entire corpus and saves token IDs to .pt files.
-        """
-        pretokenized_dir = os.path.join(self.config.get("pretokenized_data_path", OpalConstants.PRETOKENIZED_DATA_PATH), "pretokenized_data")
-        os.makedirs(pretokenized_dir, exist_ok=True)
-        print(f"✅ Pre-tokenizing and saving to {pretokenized_dir}")
-
-        pretokenized_file_paths = []
-        for raw_file_path in tqdm(raw_file_paths, desc="Pre-tokenizing files"):
-            with open(raw_file_path, 'r', encoding='utf-8') as f:
-                raw_text = f.read()
-            
-            # Tokenize and get a single tensor of IDs
-            token_ids = self.tokenizer.encode(raw_text, out_type=int)
-            token_tensor = torch.tensor(token_ids, dtype=torch.long)
-            
-            # Create a unique filename for the pre-tokenized file
-            pretokenized_filename = f"{os.path.splitext(os.path.basename(raw_file_path))[0]}.pt"
-            pretokenized_file_path = os.path.join(pretokenized_dir, pretokenized_filename)
-            
-            torch.save(token_tensor, pretokenized_file_path)
-            pretokenized_file_paths.append(pretokenized_file_path)
-
-        return pretokenized_file_paths
-
-    def _pre_tokenize_corpus(self, input_text_file, tokenizer_model, output_file):
+    def _pretokenize_corpus(self, input_text_file, tokenizer_model, output_file):
         """
         Tokenizes the entire corpus and saves as a tensor for faster training restarts.
         STREAMING implementation: encodes line-by-line to avoid gigantic single-string encode.
@@ -286,9 +211,7 @@ class Opal:
 
         print(f"✅  Pretokenizing corpus (streaming)... from {input_text_file}")
         eos_id = sp.eos_id() if sp.eos_id() >= 0 else 0
-        # For now disable the EOS the corpus itself will have the 
-        # <SEP> <BOS> and <EOS> tokens added
-        add_eos = False
+        add_eos = True
 
         total_ids = 0
         total_lines = 0
@@ -375,15 +298,8 @@ class Opal:
             str: The content of the text file as a string.
         """
         txt = None
-
-        import git
-        repo = git.Repo(os.path.dirname(os.path.realpath(__file__)), search_parent_directories=True)
-        repo_dir = Path(repo.git.rev_parse("--show-toplevel"))
-
-        # Move one level up from repo top-level
-        parent_dir = repo_dir.parent  
-
-        # Construct path
+    
+        # Get the directory of the current file        # Construct path
         #file_path = parent_dir / "data" / "tokenizer_text" / "network_tokenizer_text_v1.txt"
         #file_path = parent_dir / "sample_data"  / "the-verdict.txt"
         file_path = OpalConstants.PRETRAIN_DATA_PATH
@@ -529,227 +445,222 @@ class Opal:
 
         return idx
 
-    def train_model_simple(self, model, optimizer, device, num_epochs,
+    def train_model_simple(self, model, train_loader, val_loader, 
+                        optimizer, scheduler, device, num_epochs,
                         eval_freq, eval_iter, start_context, tokenizer,
-                        writer=None, log_to_wandb=False, scheduler_state_dict=None):
+                        writer=None, log_to_wandb=False):
         # Initialize lists to track losses and tokens seen
         train_losses, val_losses, track_tokens_seen = [], [], []
-        train_perplexities, val_perplexities = [], []
         tokens_seen, global_step = 0, -1
 
         best_val_loss = float("inf")
-        epochs_no_improve = 0
+        epochs_no_improve = 0  # Track epochs without improvement
         early_stopping_patience = self.config["early_stopping_patience"]
         device = TRAINING_CONFIG["device"]
+
         scaler = get_scaler() if TRAINING_CONFIG["mixed_precision"] else None
 
-        if self.is_finetune:
-            print("✅ Running fine-tuning data pipeline.")
-            with open(self.finetune_data_path, 'r', encoding='utf-8') as f:
-                finetune_data = [json.loads(line) for line in f]
-            
-            # Split data into training and validation sets
-            random.shuffle(finetune_data)
-            split_idx = int(len(finetune_data) * 0.95)
-            train_data = finetune_data[:split_idx]
-            val_data = finetune_data[split_idx:]
-
-            train_dataset = OpalFinetuneDataset(train_data, self.tokenizer)
-            val_dataset = OpalFinetuneDataset(val_data, self.tokenizer)
-        else:
-            print("✅ Running pre-training data pipeline.")
-            # --- NEW DATA PIPELINE ---
-            # 1. Get paths to the RAW text files
-            raw_file_paths = self.get_pretraining_file_paths()
-            
-            # 2. Check if pre-tokenized files already exist
-            pretokenized_dir = os.path.join(self.config.get("pretokenized_data_path", OpalConstants.PRETOKENIZED_DATA_PATH), "pretokenized_data")
-            pretokenized_file_paths = glob.glob(os.path.join(pretokenized_dir, "*.pt"))
-
-            if not pretokenized_file_paths:
-                print("❗ Pre-tokenized files not found. Starting pre-tokenization process...")
-                pretokenized_file_paths = self._pretokenize_corpus(raw_file_paths)
-            else:
-                print(f"✅ Found {len(pretokenized_file_paths)} pre-tokenized files. Skipping pre-tokenization.")
-
-            # 3. Create the full dataset from the pre-tokenized file paths
-            full_dataset = OpalFileDataset(
-                file_paths=pretokenized_file_paths,
-                max_length=self.config["context_length"],
-                stride=256
-            )
-
-            # 4. Use random_split to create training and validation subsets
-            train_size = int(0.95 * len(full_dataset))
-            val_size = len(full_dataset) - train_size
-            train_dataset, val_dataset = random_split(
-                full_dataset, 
-                [train_size, val_size],
-                generator=torch.Generator().manual_seed(42) # for reproducibility
-            )
-
-        print("✅ Creatig the training dataloader")
-        # 5. Create DataLoaders from the subsets
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=TRAINING_CONFIG.get("batch_size", 8),
-            shuffle=True,
-            drop_last=True,
-            num_workers=TRAINING_CONFIG.get("num_workers", 4),  # Increased for file-based dataset
-            pin_memory=True, 
-            persistent_workers=self.config["persistent_workers"],
-            prefetch_factor= 8 if TRAINING_CONFIG.get("num_workers", 0) > 0 else None  # Increased prefetch
-        )
-        print("✅ Creatig the training value dataloader")
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=TRAINING_CONFIG.get("batch_size", 8),
-            shuffle=False,
-            drop_last=True,
-            num_workers=TRAINING_CONFIG.get("num_workers", 4),  # Increased for file-based dataset
-            pin_memory=True, 
-            persistent_workers=self.config["persistent_workers"],
-            prefetch_factor= 8 if TRAINING_CONFIG.get("num_workers", 0) > 0 else None  # Increased prefetch
-        )
-
-               # ----------------------------------------
-        # Scheduler with Warmup + CosineAnnealingLR  #Finetune-Optional
-        # ----------------------------------------
+        # ✅ Setup Warmup + Cosine Scheduler
         total_steps = num_epochs * len(train_loader)
-        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=total_steps
-        )
-
-        print(f"✅ Total steps for the training loader: {total_steps} ")
-        warmup_steps = total_steps * 0.05
+        warmup_steps = int(total_steps * 0.05)  # 5% warmup
+        
+        print(f"📊 Training setup: {total_steps} total steps, {warmup_steps} warmup steps")
+        
+        # Create warmup scheduler
         def lr_lambda(step):
             if step < warmup_steps:
                 return float(step) / float(max(1, warmup_steps))
             return 1.0
-
-        print("✅ Created learning rate scheduler")
-        warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-        if scheduler_state_dict:
-            cosine_scheduler.load_state_dict(scheduler_state_dict)
-
-        scheduler = cosine_scheduler
-
-        print(f"✅ Created training and validation data loaders.")
-        print(f"✅ Training with {len(train_dataset)} chunks, validating with {len(val_dataset)} chunks.")
         
-        model.eval()
-        self.generate_with_topk(model, tokenizer, device, start_context, 100)
+        warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        
+        # The main scheduler (cosine) is passed from train_and_save_model
+
         # Main training loop
         for epoch in range(num_epochs):
             model.train()  # Set model to training mode
-            
-            for input_ids, targets in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}"):
-                global_step += 1
-                input_ids, targets = input_ids.to(device), targets.to(device)
-                
-                optimizer.zero_grad()
-                
-                with torch.cuda.amp.autocast(enabled=TRAINING_CONFIG["mixed_precision"]):
-                    outputs = model(input_ids, labels=targets)
-                    loss = outputs["loss"]
-                
-                if scaler:
+
+            # Create a progress bar for the training data
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
+            start_time = time.time()
+
+            epoch_best_val_loss = best_val_loss  # Track best val loss for this epoch
+
+            # This loop iterates over the training data for the specified number of epochs.
+            # Since the DataLoader is set to drop the last batch if it is not full, the number of
+            # iterations is equal to the total number of samples in the dataset divided by the
+            # batch size, rounded down. To calculate the number of iterations, we can use the
+            # following formula:
+            #
+            # num_iterations = math.floor(len(dataset) / batch_size)
+            #
+            # For example, if the dataset has 1000 samples and the batch size is 32, the number of
+            # iterations is:
+            #
+            # num_iterations = math.floor(1000 / 32) = 31
+            #
+            # Therefore, the model will be trained on 31 batches of 32 samples each, for a total of
+            # 992 samples (31 * 32 = 992).
+            #
+            # The remaining 8 samples (1000 - 992 = 8) will be dropped, since the last batch is not
+            # full.
+            for batch_idx, (input_ids, targets) in enumerate(pbar):
+                #for input_batch, target_batch in train_loader:
+                # Reset loss gradients from previous batch iteration, so we start fresh
+                optimizer.zero_grad(set_to_none=True)  
+
+                # Move input and target tensors to the specified device
+                input_ids = input_ids.to(device, non_blocking=True)
+                targets = targets.to(device, non_blocking=True)
+
+                loss = self.calc_loss_batch(input_ids, targets, model, device)
+
+                # Backpropagation with or without mixed precision
+                if TRAINING_CONFIG["mixed_precision"]:
                     scaler.scale(loss).backward()
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                else:
+                    loss.backward()
+
+                # Calculate gradient norm before clipping
+                total_norm = 0.0
+
+                for p in model.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                total_norm = total_norm ** 0.5
+
+                # Clip gradients to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+                # Optimizer step
+                if TRAINING_CONFIG["mixed_precision"]:
                     scaler.step(optimizer)
                     scaler.update()
                 else:
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     optimizer.step()
-                
-                scheduler.step()
-                
-                # GEMINI: Restore logging functionality
-                train_loss = loss.item()
-                train_perplexity = math.exp(train_loss) if train_loss < 300 else float('inf')
-                
-                # Calculate gradient norm
-                total_norm = 0.0
-                if TRAINING_CONFIG["mixed_precision"]:
-                    # Scaled gradients are unscaled by this point
-                    for p in model.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            total_norm += param_norm.item() ** 2
-                    total_norm = total_norm ** 0.5
+
+                # ✅ Update learning rate with warmup + cosine scheduling
+                if global_step < warmup_steps:
+                    # During warmup: use warmup scheduler
+                    warmup_scheduler.step()
                 else:
-                    for p in model.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            total_norm += param_norm.item() ** 2
-                    total_norm = total_norm ** 0.5
+                    # After warmup: use main scheduler (cosine annealing)
+                    if scheduler:
+                        scheduler.step()
 
-                # Log to TensorBoard
-                if writer:
-                    writer.add_scalar("Loss/train", train_loss, global_step)
-                    writer.add_scalar("Perplexity/train", train_perplexity, global_step)
-                    writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], global_step)
-                    writer.add_scalar("GradNorm", total_norm, global_step)
-                
-                # Log to Weights & Biases
-                if log_to_wandb:
-                    wandb.log({
-                        "train_loss": train_loss,
-                        "train_perplexity": train_perplexity,
-                        "lr": optimizer.param_groups[0]["lr"],
-                        "grad_norm": total_norm,
-                        "step": global_step
-                    })
-                
-            # Validation step after each epoch
-            val_loss = self.evaluate_model(model, val_loader, device)
-            val_perplexity = math.exp(val_loss) if val_loss < 300 else float('inf')
-            val_losses.append(val_loss)
+                tokens_seen += input_ids.numel()
+                global_step += 1
 
-            # Log validation metrics after the epoch
-            if writer:
-                writer.add_scalar("Loss/val", val_loss, global_step)
-                writer.add_scalar("Perplexity/val", val_perplexity, global_step)
-            if log_to_wandb:
-                wandb.log({
-                    "val_loss": val_loss,
-                    "val_perplexity": val_perplexity,
-                    "epoch": epoch
-                })
-            
-            # Early stopping check
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+                # Optional evaluation step - 🔧 FIXED: Less frequent evaluation
+                eval_frequency = eval_freq if not self.is_finetune else max(eval_freq * 4, 100)  # Less frequent for fine-tuning
+                if global_step % eval_frequency == 0 and global_step > 0:  # Skip first step evaluation
+                    train_loss, val_loss = self.evaluate_model(
+                        model, train_loader, val_loader, device, eval_iter)
+                    train_losses.append(train_loss)
+                    val_losses.append(val_loss)
+                    track_tokens_seen.append(tokens_seen)
+                    
+                    # Calculate perplexity from losses
+                    train_perplexity = torch.exp(torch.tensor(train_loss)).item()
+                    val_perplexity = torch.exp(torch.tensor(val_loss)).item()
+                    
+                    # Get current learning rate for logging
+                    current_lr = optimizer.param_groups[0]["lr"]
+                    warmup_progress = min(global_step / warmup_steps, 1.0) if warmup_steps > 0 else 1.0
+
+                    # ✅ Early Stopping Logic (best val loss updated here)
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        print(f"🔥 New best val_loss {val_loss:.6f}! Saving temporary checkpoint...")
+                        self.save_model_checkpoint(
+                            self.config, model, optimizer, scheduler,
+                            epoch, train_losses, val_losses,
+                            tokenizer_model=OpalConstants.TOKENIZER_MODEL_PATH
+                        )
+                    else:
+                        print(f"⚠️ No improvement at this evaluation (current: {val_loss:.6f}, best: {best_val_loss:.6f})")
+
+                    #Calculate tokens/sec
+                    elapsed = time.time() - start_time
+                    tokens_per_sec = tokens_seen / max(elapsed, 1e-6)
+
+                    # Get memory usage
+                    cpu_mem_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+                    gpu_mem_mb = get_gpu_memory_allocated_size() / (1024 * 1024) if get_gpu_memory_allocated_size() > 0 else 0
+                    
+                    # Enhanced logging with warmup info and perplexity
+                    warmup_status = f"Warmup {warmup_progress:.1%}" if global_step < warmup_steps else "Post-warmup"
+                    print(f"Ep {epoch+1} (Step {global_step+1:06d}/{total_steps:06d}) {warmup_status}: "
+                        f"Train loss {train_loss:.6f} (Train Perplexity {train_perplexity:.2f}), "
+                        f"Val loss {val_loss:.6f} (Val Perplexity {val_perplexity:.2f}), "
+                        f"LR {current_lr:.2e}, "
+                        f"CPU mem {cpu_mem_mb:.2f} MB, GPU mem {gpu_mem_mb:.2f} MB, "
+                        f"Tokens/sec {tokens_per_sec:.2f}")
+
+                    #  Log metrics to TensorBoard
+                    if writer:
+                        writer.add_scalar("Loss/train", train_loss, global_step)
+                        writer.add_scalar("Loss/val", val_loss, global_step)
+                        writer.add_scalar("Perplexity/train", train_perplexity, global_step)
+                        writer.add_scalar("Perplexity/val", val_perplexity, global_step)
+                        writer.add_scalar("LearningRate", current_lr, global_step)
+                        writer.add_scalar("WarmupProgress", warmup_progress, global_step)
+                        writer.add_scalar("GradNorm", total_norm, global_step)
+                        writer.add_scalar("Tokens/sec", tokens_per_sec, global_step)
+                        writer.add_scalar("CPU_Memory_MB", cpu_mem_mb, global_step)
+                        if gpu_mem_mb > 0:
+                            writer.add_scalar("GPU_Memory_MB", gpu_mem_mb, global_step)
+
+                    #  Log metrics to Weights & Biases
+                    if log_to_wandb:
+                        wandb.log({
+                            "train_loss": train_loss,
+                            "val_loss": val_loss,
+                            "train_perplexity": train_perplexity,
+                            "val_perplexity": val_perplexity,
+                            "lr": current_lr,
+                            "warmup_progress": warmup_progress,
+                            "grad_norm": total_norm,
+                            "tokens_per_sec": tokens_per_sec,
+                            "cpu_memory_mb": cpu_mem_mb,
+                            "gpu_memory_mb": gpu_mem_mb,
+                            "step": global_step
+                        })
+
+            # ✅ After each epoch, check if val_loss improved in this epoch
+            if best_val_loss < epoch_best_val_loss:
                 epochs_no_improve = 0
-                print(f"✅ Validation loss improved to {best_val_loss:.4f}. Saving checkpoint.")
-                self.save_model_checkpoint(self.config, model, optimizer, scheduler, epoch, train_losses, val_losses, tokenizer)
             else:
                 epochs_no_improve += 1
-                print(f"❗ Validation loss did not improve. Patience: {epochs_no_improve}/{early_stopping_patience}")
-                if epochs_no_improve >= early_stopping_patience:
-                    print("Early stopping triggered due to no improvement in validation loss.")
-                    break # Exit the training loop
-                    
-            print(f"Epoch {epoch + 1}/{num_epochs} finished.")
+                print(f"⚠️ No improvement for {epochs_no_improve} epochs")
 
-        print("✅ Training complete.")
+            if epochs_no_improve >= early_stopping_patience:
+                print(f"⛔ Early stopping triggered after {early_stopping_patience} epochs!")
+                return train_losses, val_losses, track_tokens_seen
 
-    def evaluate_model(self, model, data_loader, device):
+            # Print a sample text after each epoch
+            # self.generate_and_print_sample(
+            #     model, tokenizer, device, start_context
+            # )
+
+            self.generate_with_topk(
+                model, tokenizer, device, start_context, top_k=50
+            )
+
+        return train_losses, val_losses, track_tokens_seen
+
+
+    def evaluate_model(self, model, train_loader, val_loader, device, eval_iter):
         model.eval()
-        total_loss = 0
         with torch.no_grad():
-            for batch in tqdm(data_loader, desc="Evaluating"):
-                # FINETUNE: Handle both pre-training and fine-tuning batch formats
-                input_ids = batch.get('input_ids') if isinstance(batch, dict) else batch[0]
-                labels = batch.get('labels') if isinstance(batch, dict) else batch[1]
-                
-                input_ids, labels = input_ids.to(device), labels.to(device)
-                outputs = model(input_ids, labels=labels)
-                total_loss += outputs.loss.item()
-        return total_loss / len(data_loader)
+            print(f"   [ ✅ Evaluating... eval_iter={eval_iter}, val_loader batches={len(val_loader)} ]")
+            train_loss = self.calc_loss_loader(train_loader, model, device, num_batches=eval_iter)
+            val_loss = self.calc_loss_loader(val_loader, model, device, num_batches=eval_iter)
+            if torch.isnan(torch.tensor(val_loss)):
+                print("⚠️ WARNING: val_loss became NaN!")   
+        model.train()
+        return train_loss, val_loss
 
 
     def generate_with_topk(self, model, tokenizer, device, start_context, top_k):
@@ -765,11 +676,11 @@ class Opal:
                                       eos_id=tokenizer.eos_id(),
                                       repetition_penalty=1.2)
             decoded_text = self.token_ids_to_text(token_ids)
-            print("\n\n")
-            print("==========================================\n")
+            print("\n")
+            print("==========================================")
             print(decoded_text.replace("\n", " "))  # Compact print format
-            print("\n==========================================")
-            print("\n\n")
+            print("==========================================")
+            print("\n")
         model.train()
 
             
@@ -1051,54 +962,21 @@ class Opal:
         plt.savefig(save_path)
         plt.close(fig)  # Close the figure to free memory
 
-    def plot_losses(self, epochs_seen, tokens_seen, train_losses, val_losses, checkpoint_path, 
-                   train_perplexities=None, val_perplexities=None):
-        """
-        Plot training and validation losses and optionally perplexities.
-        
-        Args:
-            epochs_seen: List of epoch numbers
-            tokens_seen: List of tokens processed
-            train_losses: List of training losses
-            val_losses: List of validation losses
-            checkpoint_path: Path to save the plot
-            train_perplexities: Optional list of training perplexities
-            val_perplexities: Optional list of validation perplexities
-        """
-        # Create subplots - 2 rows if perplexities are provided, 1 row otherwise
-        if train_perplexities is not None and val_perplexities is not None:
-            fig, (ax1, ax3) = plt.subplots(2, 1, figsize=(10, 8))
-        else:
-            fig, ax1 = plt.subplots(figsize=(10, 6))
+    def plot_losses(self, epochs_seen, tokens_seen, train_losses, val_losses, checkpoint_path):
+        fig, ax1 = plt.subplots(figsize=(5, 3))
 
         # Plot training and validation loss against epochs
-        ax1.plot(epochs_seen, train_losses, label="Training loss", color='blue')
-        ax1.plot(epochs_seen, val_losses, linestyle="-.", label="Validation loss", color='red')
+        ax1.plot(epochs_seen, train_losses, label="Training loss")
+        ax1.plot(epochs_seen, val_losses, linestyle="-.", label="Validation loss")
         ax1.set_xlabel("Epochs")
         ax1.set_ylabel("Loss")
         ax1.legend(loc="upper right")
         ax1.xaxis.set_major_locator(MaxNLocator(integer=True))  # only show integer labels on x-axis
-        ax1.set_title("Training and Validation Loss")
 
         # Create a second x-axis for tokens seen
         ax2 = ax1.twiny()  # Create a second x-axis that shares the same y-axis
         ax2.plot(tokens_seen, train_losses, alpha=0)  # Invisible plot for aligning ticks
         ax2.set_xlabel("Tokens seen")
-
-        # Plot perplexity if provided
-        if train_perplexities is not None and val_perplexities is not None:
-            ax3.plot(epochs_seen, train_perplexities, label="Training perplexity", color='blue')
-            ax3.plot(epochs_seen, val_perplexities, linestyle="-.", label="Validation perplexity", color='red')
-            ax3.set_xlabel("Epochs")
-            ax3.set_ylabel("Perplexity")
-            ax3.legend(loc="upper right")
-            ax3.xaxis.set_major_locator(MaxNLocator(integer=True))
-            ax3.set_title("Training and Validation Perplexity")
-            
-            # Create a second x-axis for tokens seen on perplexity plot
-            ax4 = ax3.twiny()
-            ax4.plot(tokens_seen, train_perplexities, alpha=0)  # Invisible plot for aligning ticks
-            ax4.set_xlabel("Tokens seen")
 
         fig.tight_layout()  # Adjust layout to make room
         
@@ -1229,6 +1107,11 @@ class Opal:
         
         return new_tokens_found
 
+    def lr_lambda(self, step):
+        if step < self.config.get("warmup_steps", 0):
+            return float(step) / float(max(1, self.config["warmup_steps"]))
+        return 1.0
+
     # Train and save model, Main training loop function
     # to train the model from scratch or continue training
     # or fine-tune the model on a new dataset
@@ -1239,7 +1122,7 @@ class Opal:
         device,
         tokenizer,
         checkpoint_path,
-        corpus_text = "",
+        corpus_text = None, # This is the pretokenized corpus text for pretraining
         num_epochs=10,
         batch_size=8,
         train_ratio=0.9,
@@ -1260,6 +1143,9 @@ class Opal:
         ✅ Warmup + CosineAnnealingLR scheduler
         ✅ Gradient accumulation + clipping
         """
+
+        if not corpus_text:
+            raise ValueError("corpus_text must be provided for pretraining")
 
         start_time = time.time()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1339,7 +1225,6 @@ class Opal:
             print(f"📊 Loaded {len(all_data)} valid samples from {finetune_data_path}")
             
             # 🔧 FIXED: Use deterministic split with shuffle to prevent data leakage
-            import random
             random.seed(42)  # Deterministic split
             random.shuffle(all_data)  # Shuffle before split
             
@@ -1354,7 +1239,6 @@ class Opal:
                 print(f"⚠️ WARNING: Validation set very small ({len(val_data)} samples). Consider larger dataset or different split ratio.")
     
             # Create temporary files for split data
-            import tempfile
             with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as train_file:
                 for item in train_data:
                     train_file.write(json.dumps(item) + '\n')
@@ -1381,76 +1265,51 @@ class Opal:
             )
     
             # Clean up temporary files after use
-            import atexit
             atexit.register(lambda: os.unlink(train_file_path) if os.path.exists(train_file_path) else None)
             atexit.register(lambda: os.unlink(val_file_path) if os.path.exists(val_file_path) else None)
+        else:
+            print("-- Pretraining with provided corpus_text")
+            if not isinstance(corpus_text, torch.Tensor):
+                raise ValueError(f"corpus_text must be a pre-tokenized torch.Tensor for pretraining, "
+                               f"but got {type(corpus_text)}. Expected tensor from loadTrainingData().")
+            
+            print(f"📊 Pretraining corpus size: {len(corpus_text):,} tokens")
+            
+            # Handle tensor/tokenized data - deterministic split for reproducible training
+            total_length = len(corpus_text)
+            split_idx = int(train_ratio * total_length)
+            train_data, val_data = corpus_text[:split_idx], corpus_text[split_idx:]
+            
+            print(f"📊 Data split: {len(train_data):,} train tokens, {len(val_data):,} val tokens")
+            
+            training_loader = self.createOpalDataLoader(
+                txt=train_data,
+                batch_size=batch_size,  # Use the passed batch_size parameter
+                max_length=config["context_length"],
+                stride=256,
+                shuffle=False,  # Don't shuffle for deterministic training
+                num_workers=TRAINING_CONFIG["num_workers"],
+            )
+            val_loader = self.createOpalDataLoader(
+                txt=val_data,
+                batch_size=batch_size,  # Use the passed batch_size parameter
+                max_length=config["context_length"],
+                stride=256,
+                shuffle=False,  # Never shuffle validation data
+                num_workers=TRAINING_CONFIG["num_workers"],
+            )
 
-        # else:
-        #     # Original pretraining corpus split
-        #     if isinstance(corpus_text, str):
+        # ----------------------------------------
+        # Scheduler with Warmup + CosineAnnealingLR  #Finetune-Optional
+        # ----------------------------------------
+        total_steps = num_epochs * len(training_loader)
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=total_steps
+        )
 
-        #         # Get the list of all text files in your data directory
-        #         # This assumes your data is pre-split into chunks in a directory
-        #         data_dir = OpalConstants.DATA_DIR
-        #         file_paths = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith('.txt')]
-
-        #         total_tokens = len(tokenizer.encode(corpus_text))
-        #         split_idx = int(train_ratio * total_tokens)
-        #         train_data, val_data = corpus_text[:split_idx], corpus_text[split_idx:]
-                
-        #         training_loader = self.createOpalDataLoader(
-        #             txt=train_data,
-        #             max_length=config["context_length"],
-        #             stride=config["context_length"],
-        #             shuffle=True,
-        #             num_workers=TRAINING_CONFIG["num_workers"],
-        #         )
-        #         val_loader = self.createOpalDataLoader(
-        #             txt=val_data,
-        #             max_length=config["context_length"],
-        #             stride=config["context_length"],
-        #             shuffle=False,
-        #             num_workers=TRAINING_CONFIG["num_workers"],
-        #         )
-        #     else:
-        #         # Handle tensor/tokenized data
-        #         total_length = len(corpus_text)
-        #         split_idx = int(train_ratio * total_length)
-        #         train_data, val_data = corpus_text[:split_idx], corpus_text[split_idx:]
-                
-        #         training_loader = self.createOpalDataLoader(
-        #             txt=train_data,
-        #             max_length=config["context_length"],
-        #             stride=config["context_length"],
-        #             shuffle=True,
-        #             num_workers=TRAINING_CONFIG["num_workers"],
-        #         )
-        #         val_loader = self.createOpalDataLoader(
-        #             txt=val_data,
-        #             max_length=config["context_length"],
-        #             stride=config["context_length"],
-        #             shuffle=False,
-        #             num_workers=TRAINING_CONFIG["num_workers"],
-        #         )
-
-        # # ----------------------------------------
-        # # Scheduler with Warmup + CosineAnnealingLR  #Finetune-Optional
-        # # ----------------------------------------
-        # total_steps = num_epochs * len(training_loader)
-        # cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        #     optimizer, T_max=total_steps
-        # )
-
-        # def lr_lambda(step):
-        #     if step < config.get("warmup_steps", 0):
-        #         return float(step) / float(max(1, config["warmup_steps"]))
-        #     return 1.0
-
-        # print("✅ Created learning rate scheduler")
-        # warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-        # if scheduler_state_dict:
-        #     cosine_scheduler.load_state_dict(scheduler_state_dict)
+        print("✅ Created learning rate scheduler")
+        if scheduler_state_dict:
+            cosine_scheduler.load_state_dict(scheduler_state_dict)
 
         # ----------------------------------------
         # Training Loop
@@ -1488,10 +1347,12 @@ class Opal:
         #         val_losses.append(val_loss)
 
         print("✅ Starting training loop")
-        train_losses, val_losses, tokens_seen, train_perplexities, val_perplexities = self.train_model_simple(
+        train_losses, val_losses, tokens_seen = self.train_model_simple(
             model=model,
+            train_loader=training_loader,
+            val_loader=val_loader,
             optimizer=optimizer,
-            # scheduler=cosine_scheduler,
+            scheduler=cosine_scheduler,
             device=device,
             num_epochs=num_epochs,
             eval_freq=eval_freq,
@@ -1499,8 +1360,7 @@ class Opal:
             start_context=start_context,
             tokenizer=tokenizer,
             writer=writer,
-            log_to_wandb=log_to_wandb,
-            scheduler_state_dict=scheduler_state_dict
+            log_to_wandb=log_to_wandb
         )
         # Save final checkpoint
         print("✅ Saving final checkpoint")

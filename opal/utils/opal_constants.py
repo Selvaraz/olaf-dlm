@@ -12,8 +12,9 @@ class OpalConstants:
 
     ## INPUTS
     DATA_DIR = f"{RUNTIME_ROOT_PATH}/dataset"
-    PRETOKENIZED_DATA_PATH = f"{DATA_DIR}/pretokenized_data/"
-    PRETRAIN_DATA_PATH = f"{DATA_DIR}/consolidated_ascii_files"
+    PRETOKENIZED_DATA_PATH = f"{DATA_DIR}/pretokenized_unified_data/olaf_tokenizer_09062025_45M.pt"
+    # PRETRAIN_DATA_PATH = f"{DATA_DIR}/consolidated_ascii_files"
+    PRETRAIN_DATA_PATH = f"{DATA_DIR}/unified_data_corpus.txt"
     TOKENIZER_MODEL_PATH = f"{RUNTIME_ROOT_PATH}/tokenizer/olaf_tokenizer_09062025_45M.model"
     FINETUNE_DATA_PATH = f"{DATA_DIR}/QA_finetune_final.jsonl"
 
