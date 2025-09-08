@@ -1195,7 +1195,7 @@ class Opal:
         ✅ Gradient accumulation + clipping
         """
 
-        if not corpus_text:
+        if corpus_text is None:
             raise ValueError("corpus_text must be provided for pretraining")
 
         start_time = time.time()
