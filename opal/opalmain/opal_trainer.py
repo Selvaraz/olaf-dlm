@@ -1,3 +1,7 @@
+import json
+import random
+import tempfile
+import atexit
 import random
 import glob
 from datetime import datetime
@@ -45,7 +49,45 @@ class Opal:
         self.finetune_data_path = finetune_data_path
     
     def collate_finetune(self, batch):
+        """
+        Dynamically pads a batch of fine-tuning samples to the longest sequence.
+        This function is used by the DataLoader to pad input and label tensors
+        to a uniform size for the current batch.
+        """
+        pad_id = self.tokenizer.pad_id() if self.tokenizer.pad_id() >= 0 else self.tokenizer.unk_id()
+
+        # Unzip the batch into separate lists for inputs and labels
+        input_ids, labels = zip(*batch)
+
+        # Pad the input tensors
+        padded_inputs = torch.nn.utils.rnn.pad_sequence(
+            input_ids,
+            batch_first=True,
+            padding_value=pad_id
+        )
+
+        # Pad the labels tensors, using -100 to ignore loss on padded tokens
+        padded_labels = torch.nn.utils.rnn.pad_sequence(
+            labels,
+            batch_first=True,
+            padding_value=-100
+        )
+
+        # FINETUNE_PH2: Enforce max context length to prevent memory issues
+        max_context_length = self.config.get("context_length", 512)
+        if padded_inputs.size(1) > max_context_length:
+            padded_inputs = padded_inputs[:, :max_context_length]
+            padded_labels = padded_labels[:, :max_context_length]
+
+        return padded_inputs, padded_labels
+
+    def collate_unused_finetune(self, batch):
         """Return a tuple (input_ids, labels) to match the model's forward(input, labels) signature."""
+        """
+            Dynamically pads a batch of fine-tuning samples to the longest sequence.
+            This function is used by the DataLoader to pad input and label tensors
+            to a uniform size for the current batch.
+        """
         pad_id = self.tokenizer.pad_id() if self.tokenizer.pad_id() >= 0 else self.tokenizer.unk_id()
         max_len = max(len(x[0]) for x in batch)
         input_ids, labels = [], []
@@ -456,20 +498,31 @@ class Opal:
         best_val_loss = float("inf")
         epochs_no_improve = 0  # Track epochs without improvement
         early_stopping_patience = self.config["early_stopping_patience"]
-        device = TRAINING_CONFIG["device"]
 
-        scaler = get_scaler() if TRAINING_CONFIG["mixed_precision"] else None
-
-        # ✅ Setup Warmup + Cosine Scheduler
-        total_steps = num_epochs * len(train_loader)
-        warmup_steps = int(total_steps * 0.05)  # 5% warmup
+        # FINETUNE_PH2: Get configuration values for both pretraining and fine-tuning
+        use_mixed_precision = TRAINING_CONFIG.get("mixed_precision", False)
+        max_grad_norm = self.config.get("max_grad_norm", 1.0)
         
-        print(f"� === TRAINING PIPELINE INITIALIZATION ===")
-        print(f"�📊 Training setup: {total_steps:,} total steps, {warmup_steps:,} warmup steps")
+        scaler = get_scaler() if use_mixed_precision else None
+
+        # FINETUNE_PH2: Adaptive Warmup - both pretraining and fine-tuning benefit from warmup
+        total_steps = num_epochs * len(train_loader)
+        if self.is_finetune:
+            # Fine-tuning: lighter warmup (2% of total steps or configured warmup_steps)
+            warmup_steps = min(self.config.get("warmup_steps", int(total_steps * 0.02)), int(total_steps * 0.1))
+        else:
+            # Pretraining: standard warmup (5% of total steps)
+            warmup_steps = int(total_steps * 0.05)
+        
+        print(f"🚀 === TRAINING PIPELINE INITIALIZATION ===")
+        print(f"📊 Mode: {'FINE-TUNING' if self.is_finetune else 'PRETRAINING'}")
+        print(f"📊 Training setup: {total_steps:,} total steps, {warmup_steps:,} warmup steps")
         print(f"📊 Epochs: {num_epochs}, Batches per epoch: {len(train_loader):,}")
+        print(f"📊 Batch size: {len(train_loader.dataset) // len(train_loader)}")
         print(f"📊 Evaluation frequency: every {eval_freq} steps, {eval_iter} batches per eval")
         print(f"📊 Early stopping patience: {early_stopping_patience} epochs")
-        print(f"📊 Mixed precision: {TRAINING_CONFIG['mixed_precision']}")
+        print(f"📊 Mixed precision: {use_mixed_precision}")
+        print(f"📊 Max gradient norm: {max_grad_norm}")
         print(f"📊 Device: {device}")
         print(f"🚀 ==========================================")
         
@@ -498,28 +551,10 @@ class Opal:
 
             epoch_best_val_loss = best_val_loss  # Track best val loss for this epoch
 
-            # This loop iterates over the training data for the specified number of epochs.
-            # Since the DataLoader is set to drop the last batch if it is not full, the number of
-            # iterations is equal to the total number of samples in the dataset divided by the
-            # batch size, rounded down. To calculate the number of iterations, we can use the
-            # following formula:
-            #
-            # num_iterations = math.floor(len(dataset) / batch_size)
-            #
-            # For example, if the dataset has 1000 samples and the batch size is 32, the number of
-            # iterations is:
-            #
-            # num_iterations = math.floor(1000 / 32) = 31
-            #
-            # Therefore, the model will be trained on 31 batches of 32 samples each, for a total of
-            # 992 samples (31 * 32 = 992).
-            #
-            # The remaining 8 samples (1000 - 992 = 8) will be dropped, since the last batch is not
-            # full.
+            # Training loop with standard per-batch gradient updates
             for batch_idx, (input_ids, targets) in enumerate(pbar):
-                #for input_batch, target_batch in train_loader:
-                # Reset loss gradients from previous batch iteration, so we start fresh
-                optimizer.zero_grad(set_to_none=True)  
+                # Zero gradients at the start of each batch
+                optimizer.zero_grad(set_to_none=True)
 
                 # Move input and target tensors to the specified device
                 input_ids = input_ids.to(device, non_blocking=True)
@@ -533,54 +568,55 @@ class Opal:
                     print(f"🚨 Skipping this batch and continuing training...")
                     continue
 
-                # Backpropagation with or without mixed precision
-                if TRAINING_CONFIG["mixed_precision"]:
+                # Backpropagation with mixed precision if enabled
+                total_norm = 0.0  # For gradient norm calculation
+
+                if use_mixed_precision:
                     scaler.scale(loss).backward()
+                    # Unscale gradients before clipping
+                    scaler.unscale_(optimizer)
+                    
+                    # Calculate gradient norm for logging
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            param_norm = p.grad.data.norm(2)
+                            total_norm += param_norm.item() ** 2
+                    total_norm = total_norm ** 0.5
+
+                    # Clip gradients
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss.backward()
+                    # Calculate gradient norm for logging
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            param_norm = p.grad.data.norm(2)
+                            total_norm += param_norm.item() ** 2
+                    total_norm = total_norm ** 0.5
+                    
+                    # Clip gradients and step optimizer
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                     optimizer.step()
 
-                # Calculate gradient norm before clipping
-                total_norm = 0.0
-
-                for p in model.parameters():
-                    if p.grad is not None:
-                        param_norm = p.grad.data.norm(2)
-                        total_norm += param_norm.item() ** 2
-                total_norm = total_norm ** 0.5
-
-                # Clip gradients to prevent exploding gradients
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-                # Optimizer step
-                if TRAINING_CONFIG["mixed_precision"]:
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    optimizer.step()
-
-                # ✅ Update learning rate with warmup + cosine scheduling
+                # Update learning rate and global step
                 if global_step < warmup_steps:
-                    # During warmup: use warmup scheduler
                     warmup_scheduler.step()
                 elif global_step == warmup_steps:
-                    # Transition point: log warmup completion
                     current_lr = optimizer.param_groups[0]["lr"]
                     print(f"\n🔥 WARMUP COMPLETED! Transitioning to cosine annealing at step {global_step+1}")
                     print(f"🔥 Learning rate at warmup completion: {current_lr:.2e}")
                     if scheduler:
                         scheduler.step()
                 else:
-                    # After warmup: use main scheduler (cosine annealing)
                     if scheduler:
                         scheduler.step()
 
-                tokens_seen += input_ids.numel()
                 global_step += 1
+                tokens_seen += input_ids.numel()
 
-                # Update progress bar with current loss
+                # Update progress bar
                 if hasattr(loss, 'item'):
                     pbar.set_postfix({
                         'loss': f'{loss.item():.4f}',
@@ -588,9 +624,10 @@ class Opal:
                         'tokens': f'{tokens_seen:,}'
                     })
 
-                # Optional evaluation step - 🔧 FIXED: Less frequent evaluation
-                eval_frequency = eval_freq if not self.is_finetune else max(eval_freq * 4, 100)  # Less frequent for fine-tuning
-                if global_step % eval_frequency == 0 and global_step > 0:  # Skip first step evaluation
+                # Evaluation
+                # Adaptive evaluation frequency for pretraining vs fine-tuning
+                eval_frequency = eval_freq if not self.is_finetune else max(eval_freq * 4, 100)
+                if global_step % eval_frequency == 0 and global_step > 0:
                     train_loss, val_loss = self.evaluate_model(
                         model, train_loader, val_loader, device, eval_iter)
                     train_losses.append(train_loss)
@@ -605,7 +642,7 @@ class Opal:
                     current_lr = optimizer.param_groups[0]["lr"]
                     warmup_progress = min(global_step / warmup_steps, 1.0) if warmup_steps > 0 else 1.0
 
-                    # ✅ Early Stopping Logic (best val loss updated here)
+                    # Early Stopping Logic (best val loss updated here)
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
                         print(f"🔥 New best val_loss {val_loss:.6f}! Saving temporary checkpoint...")
@@ -617,7 +654,7 @@ class Opal:
                     else:
                         print(f"⚠️ No improvement at this evaluation (current: {val_loss:.6f}, best: {best_val_loss:.6f})")
 
-                    #Calculate tokens/sec
+                    # Calculate tokens/sec
                     elapsed = time.time() - start_time
                     tokens_per_sec = tokens_seen / max(elapsed, 1e-6)
 
@@ -627,14 +664,15 @@ class Opal:
                     
                     # Enhanced logging with warmup info and perplexity
                     warmup_status = f"Warmup {warmup_progress:.1%}" if global_step < warmup_steps else "Post-warmup"
-                    print(f"Ep {epoch+1} (Step {global_step+1:06d}/{total_steps:06d}) {warmup_status}: "
+                    mode_prefix = "FT" if self.is_finetune else "PT"
+                    print(f"{mode_prefix} Ep {epoch+1} (Step {global_step:06d}/{total_steps:06d}) {warmup_status}: "
                         f"Train loss {train_loss:.6f} (PPL {train_perplexity:.2f}), "
                         f"Val loss {val_loss:.6f} (PPL {val_perplexity:.2f}), "
                         f"LR {current_lr:.2e}, "
                         f"CPU mem {cpu_mem_mb:.2f} MB, GPU mem {gpu_mem_mb:.2f} MB, "
                         f"Tokens/sec {tokens_per_sec:.2f}")
 
-                    #  Log metrics to TensorBoard
+                    # Log metrics to TensorBoard
                     if writer:
                         writer.add_scalar("Loss/train", train_loss, global_step)
                         writer.add_scalar("Loss/val", val_loss, global_step)
@@ -648,7 +686,7 @@ class Opal:
                         if gpu_mem_mb > 0:
                             writer.add_scalar("GPU_Memory_MB", gpu_mem_mb, global_step)
 
-                    #  Log metrics to Weights & Biases
+                    # Log metrics to Weights & Biases
                     if log_to_wandb:
                         wandb.log({
                             "train_loss": train_loss,
@@ -661,7 +699,8 @@ class Opal:
                             "tokens_per_sec": tokens_per_sec,
                             "cpu_memory_mb": cpu_mem_mb,
                             "gpu_memory_mb": gpu_mem_mb,
-                            "step": global_step
+                            "step": global_step,
+                            "mode": "finetune" if self.is_finetune else "pretrain"
                         })
 
             # ✅ After each epoch, check if val_loss improved in this epoch
@@ -1198,7 +1237,7 @@ class Opal:
         ✅ Gradient accumulation + clipping
         """
 
-        if corpus_text is None:
+        if corpus_text is None and not self.is_finetune:
             raise ValueError("corpus_text must be provided for pretraining")
 
         start_time = time.time()
@@ -1257,6 +1296,7 @@ class Opal:
             if not finetune_data_path:
                 raise ValueError("finetune_data_path must be provided for fine-tuning")
 
+            print("✅ Fine-tuning mode enabled, starting the finetune data pipeline")
             print(f"-- Fine-tuning with {finetune_data_path}")
             
             # 🔧 FIXED: Load data once and split PROPERLY (avoid data leakage)
@@ -1307,7 +1347,7 @@ class Opal:
                 data_jsonl=train_file_path,
                 batch_size=batch_size,
                 max_length=config["context_length"],
-                shuffle=True,
+                shuffle=False,
                 num_workers=TRAINING_CONFIG["num_workers"]
             )
             val_loader = self.createOpalFinetuneDataLoader(
@@ -1401,7 +1441,7 @@ class Opal:
         #         val_losses.append(val_loss)
 
         print("✅ Starting training loop")
-        train_losses, val_losses, tokens_seen = self.train_model_simple(
+        train_losses, val_losses, track_tokens_seen = self.train_model_simple(
             model=model,
             train_loader=training_loader,
             val_loader=val_loader,
@@ -1418,16 +1458,5 @@ class Opal:
         )
         # Save final checkpoint
         print("✅ Saving final checkpoint")
-        final_ckpt = self.save_model_checkpoint(
-            config,
-            model,
-            optimizer,
-            cosine_scheduler,
-            epoch + num_epochs,
-            train_losses,
-            val_losses,
-            tokenizer_model=OpalConstants.TOKENIZER_MODEL_PATH,
-            timestamp=timestamp
-        )
-
-        return final_ckpt
+        # FINETUNE_PH2: Return training results with correct variable name
+        return train_losses, val_losses, track_tokens_seen

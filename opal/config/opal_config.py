@@ -111,7 +111,7 @@ _TRAINING_CONFIG_GPU = {
     "batch_size": 32,
     "num_workers": 8,
     "mixed_precision": True, 
-    "gradient_accumulation_steps": 2
+    "gradient_accumulation_steps": 1
 }
 
 

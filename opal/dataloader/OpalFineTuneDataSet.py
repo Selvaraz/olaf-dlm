@@ -37,22 +37,20 @@ class OpalFinetuneDataset(Dataset):
                 continue
 
             full_text = f"<BOS> {prompt} {response_text} <EOS>"
-            #full_text = prompt.strip() + " " + response_text.strip()
 
             input_ids = self.tokenizer.encode(full_text, out_type=int)
-            #print("OpalFineTuneDataset: Input token IDs min:", min(input_ids), "max:", max(input_ids))
-            #print("UNK ID:", self.tokenizer.pad_id())
 
-            # Mask prompt tokens so loss is applied only on response
-            prompt_ids = self.tokenizer.encode(f"<BOS> {prompt}", out_type=int)
+            # 🔧 CRITICAL FIX: Proper prompt masking with exact boundary alignment
+            prompt_with_bos = f"<BOS> {prompt} "  # Include space after prompt
+            prompt_ids = self.tokenizer.encode(prompt_with_bos, out_type=int)
+            
             # Truncate if too long
             if len(input_ids) > self.max_length:
                 input_ids = input_ids[:self.max_length]
                 
             prompt_len = min(len(prompt_ids), len(input_ids))
 
-            # Apply the masks for the prompt tokens, so our DLM does not 
-            # Learn about the prompt :-D
+            # Apply masks for prompt tokens - model only learns response generation
             labels = [-100] * prompt_len + input_ids[prompt_len:]
             
             # Ensure labels are also truncated to match input_ids length
