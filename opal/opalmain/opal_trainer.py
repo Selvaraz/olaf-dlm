@@ -723,6 +723,10 @@ class Opal:
                 print(f"⛔ No improvement for {early_stopping_patience} consecutive epochs!")
                 print(f"⛔ Final best validation loss: {best_val_loss:.6f}")
                 print(f"⛔ Training stopped at epoch {epoch+1}/{num_epochs}")
+                
+                # Export to ONNX even when early stopping
+                self._export_to_onnx(device, val_loader, writer, log_to_wandb)
+                
                 return train_losses, val_losses, track_tokens_seen
 
             # Print a sample text after each epoch
@@ -741,7 +745,97 @@ class Opal:
         print(f"🎉 Total tokens processed: {tokens_seen:,}")
         print(f"🎉 ========================================")
 
+        # Export to ONNX and quantized ONNX after training completion
+        self._export_to_onnx(device, val_loader, writer, log_to_wandb)
+
         return train_losses, val_losses, track_tokens_seen
+
+    def _export_to_onnx(self, device, val_loader=None, writer=None, log_to_wandb=False):
+        """
+        Helper method to export the trained model to ONNX and quantized ONNX formats.
+        
+        Args:
+            device (str): Device used for training
+            val_loader: Validation DataLoader for evaluation (optional)
+            writer: TensorBoard writer (optional)
+            log_to_wandb (bool): Whether to log to Weights & Biases
+        """
+        try:
+            print(f"\n🔄 === EXPORTING TO ONNX ===")
+            
+            # Get the latest checkpoint path
+            if not self.is_finetune:
+                latest_checkpoint = os.path.join(OpalConstants.CHECKPOINT_DIR, "checkpoint-latest.pt")
+            else:
+                latest_checkpoint = os.path.join(OpalConstants.CHECKPOINT_DIR, "finetune-latest.pt")
+            
+            if os.path.exists(latest_checkpoint):
+                # Resolve symlink to get actual checkpoint path
+                final_checkpoint_path = os.path.realpath(latest_checkpoint)
+                checkpoint_dir = os.path.dirname(final_checkpoint_path)
+                checkpoint_filename = os.path.splitext(os.path.basename(final_checkpoint_path))[0]
+                
+                # Define ONNX output paths
+                onnx_path = os.path.join(checkpoint_dir, f"{checkpoint_filename}.onnx")
+                quantized_path = os.path.join(checkpoint_dir, f"{checkpoint_filename}_quantized.onnx")
+                
+                print(f"📦 Exporting PyTorch model to ONNX...")
+                print(f"📦 Checkpoint: {final_checkpoint_path}")
+                print(f"📦 ONNX output: {onnx_path}")
+                print(f"📦 Quantized output: {quantized_path}")
+                
+                # Export and quantize
+                from ..export.export_onnx import export_and_quantize_model
+                export_and_quantize_model(
+                    config=self.config,
+                    checkpoint_path=final_checkpoint_path,
+                    onnx_output_path=onnx_path,
+                    quantized_output_path=quantized_path,
+                    device=device
+                )
+                
+                print(f"✅ ONNX export completed successfully!")
+                print(f"✅ Standard ONNX model: {onnx_path}")
+                print(f"✅ Quantized ONNX model: {quantized_path}")
+                
+                # Optionally evaluate the exported models for comparison
+                if val_loader is not None:
+                    print(f"\n🔍 === EVALUATING EXPORTED MODELS ===")
+                    try:
+                        # Evaluate PyTorch model
+                        pytorch_loss, pytorch_ppl = evaluate_pytorch(final_checkpoint_path, val_loader, device)
+                        print(f"📊 PyTorch Model - Loss: {pytorch_loss:.4f}, Perplexity: {pytorch_ppl:.4f}")
+                        
+                        # Evaluate Quantized ONNX model
+                        onnx_loss, onnx_ppl = evaluate_onnx(quantized_path, val_loader, device)
+                        print(f"📊 Quantized ONNX - Loss: {onnx_loss:.4f}, Perplexity: {onnx_ppl:.4f}")
+                        
+                        # Log to TensorBoard if available
+                        if writer:
+                            writer.add_scalar("Final_Eval/Loss_PyTorch", pytorch_loss)
+                            writer.add_scalar("Final_Eval/Perplexity_PyTorch", pytorch_ppl)
+                            writer.add_scalar("Final_Eval/Loss_ONNX", onnx_loss)
+                            writer.add_scalar("Final_Eval/Perplexity_ONNX", onnx_ppl)
+                        
+                        # Log to W&B if available
+                        if log_to_wandb:
+                            wandb.log({
+                                "final_loss_pytorch": pytorch_loss,
+                                "final_ppl_pytorch": pytorch_ppl,
+                                "final_loss_onnx": onnx_loss,
+                                "final_ppl_onnx": onnx_ppl
+                            })
+                        
+                    except Exception as eval_error:
+                        print(f"⚠️ Model evaluation failed: {eval_error}")
+                        print(f"⚠️ ONNX models exported successfully but evaluation skipped")
+                
+            else:
+                print(f"⚠️ No checkpoint found at {latest_checkpoint}, skipping ONNX export")
+                
+        except Exception as export_error:
+            print(f"❌ ONNX export failed: {export_error}")
+            print(f"❌ Training completed but ONNX export encountered an error")
 
 
     def evaluate_model(self, model, train_loader, val_loader, device, eval_iter):
@@ -1271,6 +1365,10 @@ class Opal:
         # ----------------------------------------
         # Load Checkpoint if available
         # ----------------------------------------
+        # During fine tune we must need the previous chekpoint
+        if self.is_finetune and os.path.exists
+
+
         try:
             print(f"Attempting to load model checkpoint from {checkpoint_path}...")
             model, optimizer_state_dict, scheduler_state_dict, epoch, train_losses, val_losses, _ = \
