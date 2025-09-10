@@ -9,10 +9,12 @@ class OpalConstants:
     CHECKPOINT_DIR = f"{RUNTIME_ROOT_PATH}/checkpoints"
     TENSORBOARD_RUN_DIR = f"{CHECKPOINT_DIR}/runs"
     CHECKPOINT_PATH = f"{CHECKPOINT_DIR}/checkpoint-latest.pt"
+    
 
     ## INPUTS
     # /workspace/dataset
     DATA_DIR = f"{RUNTIME_ROOT_PATH}/dataset"
+    FINETUNE_TEST_DATA_PATH = f"{DATA_DIR}/unified_finetune_corpus.jsonl"
     # /workspace/dataset/pretokenized_unified_data/olaf_tokenizer_09062025_45M.pt
     PRETOKENIZED_DATA_PATH = f"{DATA_DIR}/pretokenized_unified_data/olaf_tokenizer_09062025_45M.pt"
     # PRETRAIN_DATA_PATH = f"{DATA_DIR}/consolidated_ascii_files"

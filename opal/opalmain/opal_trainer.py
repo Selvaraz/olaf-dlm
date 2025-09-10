@@ -1106,6 +1106,26 @@ class Opal:
         else:
             print(f"✅ Model loaded from {checkpoint_path}")
             checkpoint = torch.load(os.path.realpath(checkpoint_path), map_location=device)
+            
+            # Display checkpoint training metrics
+            train_losses = checkpoint.get("train_losses", [])
+            val_losses = checkpoint.get("val_losses", [])
+            epoch = checkpoint.get("epoch", 0)
+            
+            if train_losses and val_losses:
+                final_train_loss = train_losses[-1] if train_losses else "N/A"
+                final_val_loss = val_losses[-1] if val_losses else "N/A"
+                
+                # Calculate perplexity from loss (perplexity = exp(loss))
+                train_perplexity = math.exp(final_train_loss) if isinstance(final_train_loss, (int, float)) else "N/A"
+                val_perplexity = math.exp(final_val_loss) if isinstance(final_val_loss, (int, float)) else "N/A"
+                
+                print(f"📊 Checkpoint epoch: {epoch}")
+                print(f"📊 Final training loss: {final_train_loss:.6f}, perplexity: {train_perplexity:.2f}")
+                print(f"📊 Final validation loss: {final_val_loss:.6f}, perplexity: {val_perplexity:.2f}")
+            else:
+                print("📊 No loss history found in checkpoint")
+            
             # Load model with saved config to ensure same architecture
             config = checkpoint["config"]
             model = model_class(config).to(device)
@@ -1365,9 +1385,10 @@ class Opal:
         # ----------------------------------------
         # Load Checkpoint if available
         # ----------------------------------------
-        # During fine tune we must need the previous chekpoint
-        if self.is_finetune and os.path.exists
-
+        # During fine tune we must need the previous checkpoint
+        if self.is_finetune and not os.path.exists(checkpoint_path):
+            print(f"❌ Fine-tuning requires a checkpoint, but {checkpoint_path} not found!")
+            return None
 
         try:
             print(f"Attempting to load model checkpoint from {checkpoint_path}...")
