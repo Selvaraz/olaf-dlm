@@ -502,14 +502,18 @@ class Opal:
         # FINETUNE_PH2: Get configuration values for both pretraining and fine-tuning
         use_mixed_precision = TRAINING_CONFIG.get("mixed_precision", False)
         max_grad_norm = self.config.get("max_grad_norm", 1.0)
+        gradient_accumulation_steps = self.config.get("gradient_accumulation_steps", 1)
         
         scaler = get_scaler() if use_mixed_precision else None
 
         # FINETUNE_PH2: Adaptive Warmup - both pretraining and fine-tuning benefit from warmup
-        total_steps = num_epochs * len(train_loader)
+        # Adjust total steps for gradient accumulation
+        steps_per_epoch = len(train_loader) // gradient_accumulation_steps
+        total_steps = num_epochs * steps_per_epoch
         if self.is_finetune:
             # Fine-tuning: lighter warmup (2% of total steps or configured warmup_steps)
-            warmup_steps = min(self.config.get("warmup_steps", int(total_steps * 0.02)), int(total_steps * 0.1))
+            #warmup_steps = min(self.config.get("warmup_steps", int(total_steps * 0.02)), int(total_steps * 0.1))
+            warmup_steps = 0
         else:
             # Pretraining: standard warmup (5% of total steps)
             warmup_steps = int(total_steps * 0.05)
@@ -518,7 +522,10 @@ class Opal:
         print(f"📊 Mode: {'FINE-TUNING' if self.is_finetune else 'PRETRAINING'}")
         print(f"📊 Training setup: {total_steps:,} total steps, {warmup_steps:,} warmup steps")
         print(f"📊 Epochs: {num_epochs}, Batches per epoch: {len(train_loader):,}")
+        print(f"📊 Effective batches per epoch (with accumulation): {steps_per_epoch:,}")
         print(f"📊 Batch size: {len(train_loader.dataset) // len(train_loader)}")
+        print(f"📊 Gradient accumulation steps: {gradient_accumulation_steps}")
+        print(f"📊 Effective batch size: {(len(train_loader.dataset) // len(train_loader)) * gradient_accumulation_steps}")
         print(f"📊 Evaluation frequency: every {eval_freq} steps, {eval_iter} batches per eval")
         print(f"📊 Early stopping patience: {early_stopping_patience} epochs")
         print(f"📊 Mixed precision: {use_mixed_precision}")
@@ -551,16 +558,22 @@ class Opal:
 
             epoch_best_val_loss = best_val_loss  # Track best val loss for this epoch
 
-            # Training loop with standard per-batch gradient updates
-            for batch_idx, (input_ids, targets) in enumerate(pbar):
-                # Zero gradients at the start of each batch
-                optimizer.zero_grad(set_to_none=True)
+            # Initialize gradient accumulation for this epoch
+            optimizer.zero_grad(set_to_none=True)
 
+            # Training loop with gradient accumulation
+            accumulated_loss = 0.0
+            for batch_idx, (input_ids, targets) in enumerate(pbar):
                 # Move input and target tensors to the specified device
                 input_ids = input_ids.to(device, non_blocking=True)
                 targets = targets.to(device, non_blocking=True)
 
+                # Calculate loss for this batch
                 loss = self.calc_loss_batch(input_ids, targets, model, device)
+                
+                # Scale loss by gradient accumulation steps to get the average
+                loss = loss / gradient_accumulation_steps
+                accumulated_loss += loss.item()
 
                 # Safety check for NaN or infinite loss
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -569,139 +582,157 @@ class Opal:
                     continue
 
                 # Backpropagation with mixed precision if enabled
-                total_norm = 0.0  # For gradient norm calculation
-
                 if use_mixed_precision:
                     scaler.scale(loss).backward()
-                    # Unscale gradients before clipping
-                    scaler.unscale_(optimizer)
-                    
-                    # Calculate gradient norm for logging
-                    for p in model.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            total_norm += param_norm.item() ** 2
-                    total_norm = total_norm ** 0.5
-
-                    # Clip gradients
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-                    scaler.step(optimizer)
-                    scaler.update()
                 else:
                     loss.backward()
-                    # Calculate gradient norm for logging
-                    for p in model.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            total_norm += param_norm.item() ** 2
-                    total_norm = total_norm ** 0.5
+
+                # Only update weights every gradient_accumulation_steps
+                is_accumulation_step = (batch_idx + 1) % gradient_accumulation_steps == 0
+                is_last_batch = batch_idx == len(train_loader) - 1
+                
+                if is_accumulation_step or is_last_batch:
+                    total_norm = 0.0  # For gradient norm calculation
                     
-                    # Clip gradients and step optimizer
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-                    optimizer.step()
+                    if use_mixed_precision:
+                        # Unscale gradients before clipping
+                        scaler.unscale_(optimizer)
+                        
+                        # Calculate gradient norm for logging
+                        for p in model.parameters():
+                            if p.grad is not None:
+                                param_norm = p.grad.data.norm(2)
+                                total_norm += param_norm.item() ** 2
+                        total_norm = total_norm ** 0.5
 
-                # Update learning rate and global step
-                if global_step < warmup_steps:
-                    warmup_scheduler.step()
-                elif global_step == warmup_steps:
-                    current_lr = optimizer.param_groups[0]["lr"]
-                    print(f"\n🔥 WARMUP COMPLETED! Transitioning to cosine annealing at step {global_step+1}")
-                    print(f"🔥 Learning rate at warmup completion: {current_lr:.2e}")
-                    if scheduler:
-                        scheduler.step()
-                else:
-                    if scheduler:
-                        scheduler.step()
+                        # Clip gradients
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        # Calculate gradient norm for logging
+                        for p in model.parameters():
+                            if p.grad is not None:
+                                param_norm = p.grad.data.norm(2)
+                                total_norm += param_norm.item() ** 2
+                        total_norm = total_norm ** 0.5
+                        
+                        # Clip gradients and step optimizer
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                        optimizer.step()
 
-                global_step += 1
+                    # Zero gradients after weight update
+                    optimizer.zero_grad(set_to_none=True)
+
+                    # Update learning rate and global step only after actual weight updates
+                    if global_step < warmup_steps:
+                        warmup_scheduler.step()
+                    elif global_step == warmup_steps:
+                        current_lr = optimizer.param_groups[0]["lr"]
+                        print(f"\n🔥 WARMUP COMPLETED! Transitioning to cosine annealing at step {global_step+1}")
+                        print(f"🔥 Learning rate at warmup completion: {current_lr:.2e}")
+                        if scheduler:
+                            scheduler.step()
+                    else:
+                        if scheduler:
+                            scheduler.step()
+
+                    global_step += 1
+                    
+                    # Update progress bar with accumulated loss
+                    if hasattr(loss, 'item'):
+                        pbar.set_postfix({
+                            'acc_loss': f'{accumulated_loss:.4f}',
+                            'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
+                            'tokens': f'{tokens_seen:,}',
+                            'acc_step': f'{(batch_idx + 1) // gradient_accumulation_steps + 1}'
+                        })
+                    
+                    # Reset accumulated loss
+                    accumulated_loss = 0.0
+
+                # Update tokens seen for every batch (not just accumulation steps)
                 tokens_seen += input_ids.numel()
 
-                # Update progress bar
-                if hasattr(loss, 'item'):
-                    pbar.set_postfix({
-                        'loss': f'{loss.item():.4f}',
-                        'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
-                        'tokens': f'{tokens_seen:,}'
-                    })
+                # Evaluation - only check on actual weight update steps
+                if is_accumulation_step or is_last_batch:
+                    # Adaptive evaluation frequency for pretraining vs fine-tuning
+                    eval_frequency = eval_freq if not self.is_finetune else max(eval_freq * 4, 100)
+                    if global_step % eval_frequency == 0 and global_step > 0:
+                        train_loss, val_loss = self.evaluate_model(
+                            model, train_loader, val_loader, device, eval_iter)
+                        train_losses.append(train_loss)
+                        val_losses.append(val_loss)
+                        track_tokens_seen.append(tokens_seen)
+                        
+                        # Calculate perplexity from losses
+                        train_perplexity = torch.exp(torch.tensor(train_loss)).item()
+                        val_perplexity = torch.exp(torch.tensor(val_loss)).item()
+                        
+                        # Get current learning rate for logging
+                        current_lr = optimizer.param_groups[0]["lr"]
+                        warmup_progress = min(global_step / warmup_steps, 1.0) if warmup_steps > 0 else 1.0
 
-                # Evaluation
-                # Adaptive evaluation frequency for pretraining vs fine-tuning
-                eval_frequency = eval_freq if not self.is_finetune else max(eval_freq * 4, 100)
-                if global_step % eval_frequency == 0 and global_step > 0:
-                    train_loss, val_loss = self.evaluate_model(
-                        model, train_loader, val_loader, device, eval_iter)
-                    train_losses.append(train_loss)
-                    val_losses.append(val_loss)
-                    track_tokens_seen.append(tokens_seen)
-                    
-                    # Calculate perplexity from losses
-                    train_perplexity = torch.exp(torch.tensor(train_loss)).item()
-                    val_perplexity = torch.exp(torch.tensor(val_loss)).item()
-                    
-                    # Get current learning rate for logging
-                    current_lr = optimizer.param_groups[0]["lr"]
-                    warmup_progress = min(global_step / warmup_steps, 1.0) if warmup_steps > 0 else 1.0
+                        # Early Stopping Logic (best val loss updated here)
+                        if val_loss < best_val_loss:
+                            best_val_loss = val_loss
+                            print(f"🔥 New best val_loss {val_loss:.6f}! Saving temporary checkpoint...")
+                            self.save_model_checkpoint(
+                                self.config, model, optimizer, scheduler,
+                                epoch, train_losses, val_losses,
+                                tokenizer_model=OpalConstants.TOKENIZER_MODEL_PATH
+                            )
+                        else:
+                            print(f"⚠️ No improvement at this evaluation (current: {val_loss:.6f}, best: {best_val_loss:.6f})")
 
-                    # Early Stopping Logic (best val loss updated here)
-                    if val_loss < best_val_loss:
-                        best_val_loss = val_loss
-                        print(f"🔥 New best val_loss {val_loss:.6f}! Saving temporary checkpoint...")
-                        self.save_model_checkpoint(
-                            self.config, model, optimizer, scheduler,
-                            epoch, train_losses, val_losses,
-                            tokenizer_model=OpalConstants.TOKENIZER_MODEL_PATH
-                        )
-                    else:
-                        print(f"⚠️ No improvement at this evaluation (current: {val_loss:.6f}, best: {best_val_loss:.6f})")
+                        # Calculate tokens/sec
+                        elapsed = time.time() - start_time
+                        tokens_per_sec = tokens_seen / max(elapsed, 1e-6)
 
-                    # Calculate tokens/sec
-                    elapsed = time.time() - start_time
-                    tokens_per_sec = tokens_seen / max(elapsed, 1e-6)
+                        # Get memory usage
+                        cpu_mem_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+                        gpu_mem_mb = get_gpu_memory_allocated_size() / (1024 * 1024) if get_gpu_memory_allocated_size() > 0 else 0
+                        
+                        # Enhanced logging with warmup info and perplexity
+                        warmup_status = f"Warmup {warmup_progress:.1%}" if global_step < warmup_steps else "Post-warmup"
+                        mode_prefix = "FT" if self.is_finetune else "PT"
+                        print(f"{mode_prefix} Ep {epoch+1} (Step {global_step:06d}/{total_steps:06d}) {warmup_status}: "
+                            f"Train loss {train_loss:.6f} (PPL {train_perplexity:.2f}), "
+                            f"Val loss {val_loss:.6f} (PPL {val_perplexity:.2f}), "
+                            f"LR {current_lr:.2e}, "
+                            f"CPU mem {cpu_mem_mb:.2f} MB, GPU mem {gpu_mem_mb:.2f} MB, "
+                            f"Tokens/sec {tokens_per_sec:.2f}")
 
-                    # Get memory usage
-                    cpu_mem_mb = psutil.Process().memory_info().rss / (1024 * 1024)
-                    gpu_mem_mb = get_gpu_memory_allocated_size() / (1024 * 1024) if get_gpu_memory_allocated_size() > 0 else 0
-                    
-                    # Enhanced logging with warmup info and perplexity
-                    warmup_status = f"Warmup {warmup_progress:.1%}" if global_step < warmup_steps else "Post-warmup"
-                    mode_prefix = "FT" if self.is_finetune else "PT"
-                    print(f"{mode_prefix} Ep {epoch+1} (Step {global_step:06d}/{total_steps:06d}) {warmup_status}: "
-                        f"Train loss {train_loss:.6f} (PPL {train_perplexity:.2f}), "
-                        f"Val loss {val_loss:.6f} (PPL {val_perplexity:.2f}), "
-                        f"LR {current_lr:.2e}, "
-                        f"CPU mem {cpu_mem_mb:.2f} MB, GPU mem {gpu_mem_mb:.2f} MB, "
-                        f"Tokens/sec {tokens_per_sec:.2f}")
+                        # Log metrics to TensorBoard
+                        if writer:
+                            writer.add_scalar("Loss/train", train_loss, global_step)
+                            writer.add_scalar("Loss/val", val_loss, global_step)
+                            writer.add_scalar("Perplexity/train", train_perplexity, global_step)
+                            writer.add_scalar("Perplexity/val", val_perplexity, global_step)
+                            writer.add_scalar("LearningRate", current_lr, global_step)
+                            writer.add_scalar("WarmupProgress", warmup_progress, global_step)
+                            writer.add_scalar("GradNorm", total_norm, global_step)
+                            writer.add_scalar("Tokens/sec", tokens_per_sec, global_step)
+                            writer.add_scalar("CPU_Memory_MB", cpu_mem_mb, global_step)
+                            if gpu_mem_mb > 0:
+                                writer.add_scalar("GPU_Memory_MB", gpu_mem_mb, global_step)
 
-                    # Log metrics to TensorBoard
-                    if writer:
-                        writer.add_scalar("Loss/train", train_loss, global_step)
-                        writer.add_scalar("Loss/val", val_loss, global_step)
-                        writer.add_scalar("Perplexity/train", train_perplexity, global_step)
-                        writer.add_scalar("Perplexity/val", val_perplexity, global_step)
-                        writer.add_scalar("LearningRate", current_lr, global_step)
-                        writer.add_scalar("WarmupProgress", warmup_progress, global_step)
-                        writer.add_scalar("GradNorm", total_norm, global_step)
-                        writer.add_scalar("Tokens/sec", tokens_per_sec, global_step)
-                        writer.add_scalar("CPU_Memory_MB", cpu_mem_mb, global_step)
-                        if gpu_mem_mb > 0:
-                            writer.add_scalar("GPU_Memory_MB", gpu_mem_mb, global_step)
-
-                    # Log metrics to Weights & Biases
-                    if log_to_wandb:
-                        wandb.log({
-                            "train_loss": train_loss,
-                            "val_loss": val_loss,
-                            "train_perplexity": train_perplexity,
-                            "val_perplexity": val_perplexity,
-                            "lr": current_lr,
-                            "warmup_progress": warmup_progress,
-                            "grad_norm": total_norm,
-                            "tokens_per_sec": tokens_per_sec,
-                            "cpu_memory_mb": cpu_mem_mb,
-                            "gpu_memory_mb": gpu_mem_mb,
-                            "step": global_step,
-                            "mode": "finetune" if self.is_finetune else "pretrain"
-                        })
+                        # Log metrics to Weights & Biases
+                        if log_to_wandb:
+                            wandb.log({
+                                "train_loss": train_loss,
+                                "val_loss": val_loss,
+                                "train_perplexity": train_perplexity,
+                                "val_perplexity": val_perplexity,
+                                "lr": current_lr,
+                                "warmup_progress": warmup_progress,
+                                "grad_norm": total_norm,
+                                "tokens_per_sec": tokens_per_sec,
+                                "cpu_memory_mb": cpu_mem_mb,
+                                "gpu_memory_mb": gpu_mem_mb,
+                                "step": global_step,
+                                "mode": "finetune" if self.is_finetune else "pretrain"
+                            })
 
             # ✅ After each epoch, check if val_loss improved in this epoch
             epoch_duration = time.time() - epoch_start_time

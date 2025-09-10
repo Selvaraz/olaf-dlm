@@ -89,10 +89,10 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
 
     # 🔹 Fine-tuning Hyperparameters - Ultra conservative for overfitting prevention
     "num_epoch": 2,                   # 🔧 Even fewer epochs 
-    "learning_rate": 1e-6,            # 🔧 Much much lower LR to slow learning
+    "learning_rate": 1e-7,            # 🔧 Much much lower LR to slow learning
     "weight_decay": 0.05,             # 🔧 More weight decay
     "early_stopping_patience": 8,     # 🔧 More patience 
-    "gradient_accumulation_steps": 1, 
+    "gradient_accumulation_steps": 4, 
     "max_grad_norm": 0.5,             # 🔧 Stricter gradient clipping
     
     # 🔹 Fine-tuning specific settings
@@ -124,7 +124,6 @@ _TRAINING_CONFIG_CPU = {
     "batch_size": 8,
     "num_workers": 0,
     "mixed_precision": False,
-    "gradient_accumulation_steps": 4
 }
 
 
