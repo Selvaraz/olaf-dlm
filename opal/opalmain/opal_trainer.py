@@ -502,8 +502,8 @@ class Opal:
         # FINETUNE_PH2: Get configuration values for both pretraining and fine-tuning
         use_mixed_precision = TRAINING_CONFIG.get("mixed_precision", False)
         max_grad_norm = self.config.get("max_grad_norm", 1.0)
-        gradient_accumulation_steps = self.config.get("gradient_accumulation_steps", 1)
-        
+        gradient_accumulation_steps = self.config.get("gradient_accumulation_steps", 4)
+
         scaler = get_scaler() if use_mixed_precision else None
 
         # FINETUNE_PH2: Adaptive Warmup - both pretraining and fine-tuning benefit from warmup
@@ -654,6 +654,15 @@ class Opal:
                 # Update tokens seen for every batch (not just accumulation steps)
                 tokens_seen += input_ids.numel()
 
+                # Print a sample text after each epoch
+                # self.generate_and_print_sample(
+                #     model, tokenizer, device, start_context
+                # )
+
+                self.generate_with_topk(
+                    model, tokenizer, device, start_context, top_k=50
+                )
+
                 # Evaluation - only check on actual weight update steps
                 if is_accumulation_step or is_last_batch:
                     # Adaptive evaluation frequency for pretraining vs fine-tuning
@@ -673,6 +682,10 @@ class Opal:
                         current_lr = optimizer.param_groups[0]["lr"]
                         warmup_progress = min(global_step / warmup_steps, 1.0) if warmup_steps > 0 else 1.0
 
+                        self.generate_with_topk(
+                            model, tokenizer, device, start_context, top_k=50
+                        )
+                        
                         # Early Stopping Logic (best val loss updated here)
                         if val_loss < best_val_loss:
                             best_val_loss = val_loss
