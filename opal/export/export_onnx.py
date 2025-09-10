@@ -55,13 +55,28 @@ def export_and_quantize_model(
     )
     print(f"ONNX model saved at {onnx_output_path}")
 
-    # 4. Quantize ONNX model
-    print(f"Quantizing model...")
-    quantize_dynamic(
-        model_input=onnx_output_path,
-        model_output=quantized_output_path,
-        weight_type=QuantType.QInt8
-    )
-    print(f"Quantized model saved at {quantized_output_path}")
+    try:
+        # 4. Quantize ONNX model
+        print(f"Quantizing model...")
+        quantize_dynamic(
+            model_input=onnx_output_path,
+            model_output=quantized_output_path,
+            weight_type=QuantType.QInt8
+        )
+        print(f"Quantized model (Int8) saved at {quantized_output_path}")
+    except Exception as e:
+        print(f"Error occurred while quantizing to int8: {e}")
+
+    try:
+        quantized_output_int4_path = quantized_output_path.replace(".onnx", "_int4.onnx")
+        quantize_dynamic(
+            model_input=onnx_output_path,
+            model_output=quantized_output_int4_path,
+            weight_type=QuantType.QInt4
+        )
+        print(f"Quantized model (int4) saved at {quantized_output_int4_path}")
+    except Exception as e:
+        print(f"Error occurred while quantizing to int4: {e}")
+    
 
     return onnx_output_path, quantized_output_path
