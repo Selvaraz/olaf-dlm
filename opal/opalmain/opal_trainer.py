@@ -681,15 +681,14 @@ class Opal:
                         # Get current learning rate for logging
                         current_lr = optimizer.param_groups[0]["lr"]
                         warmup_progress = min(global_step / warmup_steps, 1.0) if warmup_steps > 0 else 1.0
-
-                        self.generate_with_topk(
-                            model, tokenizer, device, start_context, top_k=50
-                        )
                         
                         # Early Stopping Logic (best val loss updated here)
                         if val_loss < best_val_loss:
                             best_val_loss = val_loss
                             print(f"🔥 New best val_loss {val_loss:.6f}! Saving temporary checkpoint...")
+                            self.generate_with_topk(
+                                model, tokenizer, device, start_context, top_k=50
+                            )
                             self.save_model_checkpoint(
                                 self.config, model, optimizer, scheduler,
                                 epoch, train_losses, val_losses,
