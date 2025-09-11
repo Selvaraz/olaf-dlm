@@ -117,28 +117,21 @@ class OpalFinetuneDataset(Dataset):
         return weights
 
     def _tokenize_with_offsets(self, text: str):
+        # SentencePiece doesn't support offset mapping, so we'll use a simple approach
         try:
-            out = self.tok(text, return_offsets_mapping=True, add_special_tokens=False)
-            if "offset_mapping" in out:
-                self._has_offsets = True
-                return out["input_ids"], out["offset_mapping"]
-        except TypeError:
-            try:
-                out = self.tok.encode_plus(text, return_offsets_mapping=True, add_special_tokens=False)
-                if "offset_mapping" in out:
-                    self._has_offsets = True
-                    return out["input_ids"], out["offset_mapping"]
-            except Exception:
-                pass
-        try:
-            ids = self.tok.encode(text, add_special_tokens=False)
+            # Try standard SentencePiece encoding
+            ids = self.tok.encode(text, out_type=int)
+            # No offset mapping available for SentencePiece, return dummy offsets
+            offsets = [(0, 0)] * len(ids)
+            return ids, offsets
         except Exception:
-            ids = self.tok(text)["input_ids"]
-        return ids, [(0,0)] * len(ids)
+            # Fallback if encoding fails
+            return [], []
 
     def _build_one(self, idx: int):
         full_text, asst_char_start, has_commands, resp_text = self._pre[idx]
         input_ids, offsets = self._tokenize_with_offsets(full_text)
+        
         if self.add_bos:
             input_ids = [self.bos_id] + input_ids
             if self._has_offsets:
@@ -147,6 +140,8 @@ class OpalFinetuneDataset(Dataset):
             input_ids = input_ids + [self.eos_id]
             if self._has_offsets:
                 offsets = offsets + [(0,0)]
+        
+        # Since SentencePiece doesn't provide offsets, calculate assistant start differently
         if self._has_offsets:
             asst_tok_start = 0
             for i, (s, e) in enumerate(offsets):
@@ -154,8 +149,18 @@ class OpalFinetuneDataset(Dataset):
                     asst_tok_start = i
                     break
         else:
+            # Fallback: encode the prefix to find token boundary
             prefix = full_text[:asst_char_start]
-            asst_tok_start = len(self.tok.encode(prefix, add_special_tokens=False))
+            try:
+                prefix_ids = self.tok.encode(prefix, out_type=int)
+                asst_tok_start = len(prefix_ids)
+                if self.add_bos:
+                    asst_tok_start += 1  # Account for BOS token
+            except Exception:
+                # Ultimate fallback: assume assistant starts at middle
+                asst_tok_start = len(input_ids) // 2
+        
+        # Truncation logic
         if len(input_ids) > self.max_length:
             overflow = len(input_ids) - self.max_length
             cut_from = 1 if self.add_bos else 0
@@ -167,13 +172,19 @@ class OpalFinetuneDataset(Dataset):
             input_ids = input_ids[: self.max_length]
             if self._has_offsets:
                 offsets = offsets[: self.max_length]
+        
+        # Create labels (mask prompt, keep response)
         labels = [-100] * len(input_ids)
         for j in range(asst_tok_start, len(input_ids)):
             labels[j] = input_ids[j]
+        
+        # Create weights
         if self._has_offsets:
             weights = self._compute_weights_from_offsets(offsets, asst_char_start, asst_tok_start, resp_text, has_commands)
         else:
+            # Simple weights: 0.0 for prompt, 1.0 for response (no command weighting without offsets)
             weights = [0.0] * asst_tok_start + [1.0] * (len(input_ids) - asst_tok_start)
+        
         return (
             torch.tensor(input_ids, dtype=torch.long),
             torch.tensor(labels, dtype=torch.long),
