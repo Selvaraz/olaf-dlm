@@ -112,12 +112,8 @@ def model_pretrain_test(start_fresh=False, opal_instance=None):
     print(f"   → Checkpoint dir: {OpalConstants.CHECKPOINT_DIR}")
     print(f"   → Dir exists: {os.path.exists(OpalConstants.CHECKPOINT_DIR)}")
 
-    # Import the config module to get current values dynamically
-    from ..config import opal_config
-    
-    # Get the current config values (after set_finetune_mode())
-    OPAL_MODEL_CONFIG = opal_config.OPAL_MODEL_CONFIG
-    TRAINING_CONFIG = opal_config.TRAINING_CONFIG
+    # Re-import the configs after calling set_finetune_mode()
+    from ..config.opal_config import OPAL_MODEL_CONFIG, TRAINING_CONFIG
     
     print(f"\n📊 FINE-TUNING MODEL CONFIGURATION:")
     print("=" * 60)
