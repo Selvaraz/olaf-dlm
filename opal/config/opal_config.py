@@ -96,15 +96,15 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
     "transformer_drop_rate": 0.15, # 🔧 Reduced from 0.2
     "attention_drop_rate": 0.1,   # 🔧 Reduced from 0.15
     "qkv_bias": True,
-    "num_epoch": 3,               # 🔧 CRITICAL: Reduced from 20 to prevent overfitting
-    "learning_rate": 1e-5,        # 🔧 CRITICAL: Increased from 1e-7 (100x) for proper convergence
-    "weight_decay": 0.01,         # 🔧 Reduced from 0.05 - less aggressive regularization
-    "warmup_steps": 200,          # 🔧 Adjusted for 3 epochs instead of 20
-    "early_stopping_patience": 2, # 🔧 Reduced from 5 - quicker stopping
+    "num_epoch": 2,               # 🔧 ULTRA-CONSERVATIVE: Reduced from 3 to prevent forgetting
+    "learning_rate": 1e-7,        # 🔧 CRITICAL: Much lower to prevent catastrophic forgetting
+    "weight_decay": 0.005,        # 🔧 Reduced from 0.01 - minimal regularization
+    "warmup_steps": 100,          # 🔧 Adjusted for 2 epochs
+    "early_stopping_patience": 1, # 🔧 Very quick stopping if overfitting
     "persistent_workers": False,
-    "gradient_accumulation_steps": 4, 
+    "gradient_accumulation_steps": 8, # 🔧 Larger accumulation for stability
     "lr_scheduler": "cosine",
-    "max_grad_norm": 1.0,         # 🔧 Increased from 0.5 - allow larger gradients
+    "max_grad_norm": 0.3,         # 🔧 Much stricter gradient clipping
     "kv_heads" : 1,                # MQA
     "use_rope": True,              # Rotary pos embeddings
     "tie_embeddings": True,        # Tie input/output embeddings
@@ -119,10 +119,10 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
 
 _TRAINING_CONFIG_GPU = {
     "device": get_device(),
-    "batch_size": 8,              # 🔧 Reduced from 32 for fine-tuning stability
-    "num_workers": 4,             # 🔧 Reduced from 8 for stability
+    "batch_size": 4,              # 🔧 Even smaller batches for ultra-conservative training
+    "num_workers": 2,             # 🔧 Reduced further for stability
     "mixed_precision": False,     # 🔧 Disabled for fine-tuning stability
-    "gradient_accumulation_steps": 4  # 🔧 Matches model config
+    "gradient_accumulation_steps": 8  # 🔧 Matches model config for effective batch size 32
 }
 
 OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_FINETUNE_45M
