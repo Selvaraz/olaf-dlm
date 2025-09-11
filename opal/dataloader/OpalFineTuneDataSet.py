@@ -116,7 +116,7 @@ class OpalFinetuneDataset(Dataset):
             i = k
         return spans
 
-    def _charpos_to_token_index_lookup(self, text: str) -> List[int]:
+    def _charpos_to_token_index_lookup(self, text: str) -> Tuple[List[int], List[int]]:
         """
         Build a list where offset[i] = number of characters in decode(ids[:i]).
         We'll use it to map a character position to a token index by binary search.
@@ -125,13 +125,12 @@ class OpalFinetuneDataset(Dataset):
         """
         ids = self._tokenize(text)
         offsets = [0]
-        accum = ""
-        # To avoid quadratic behavior on large texts, we incrementally decode by appending
-        # each next token to a running prefix using tokenizer.decode on slices.
-        # SentencePiece decode is deterministic and stable for this purpose.
-        for t in ids:
-            accum = self.tokenizer.decode(self.tokenizer.encode(accum, out_type=int) + [t])
-            offsets.append(len(accum))
+        
+        # Decode incrementally by slicing - much more efficient and avoids potential loops
+        for i in range(1, len(ids) + 1):
+            decoded_slice = self.tokenizer.decode(ids[:i])
+            offsets.append(len(decoded_slice))
+        
         return ids, offsets
 
     @staticmethod
@@ -150,68 +149,82 @@ class OpalFinetuneDataset(Dataset):
 
     def _build_samples(self):
         samples = []
-        for ex in self.data:
-            prompt = ex.get("prompt", "")
-            response_obj = ex.get("response", {})
-
-            user_text, asst_head, resp_text = self._wrap_texts(prompt, response_obj)
-
-            # Tokenize parts separately
-            user_ids = self._tokenize(user_text)
-            asst_head_ids = self._tokenize(asst_head)
-            resp_ids = self._tokenize(resp_text)
-
-            # Compose with BOS/EOS
-            input_ids: List[int] = []
-            if self.bos_id >= 0:
-                input_ids.append(self.bos_id)
-            input_ids.extend(user_ids)
-            input_ids.extend(asst_head_ids)
-            assistant_start_idx = len(input_ids)  # labels start here
-            input_ids.extend(resp_ids)
-            if self.eos_id >= 0:
-                input_ids.append(self.eos_id)
-
-            # Truncate (prefer trimming user side; keep assistant content)
-            if len(input_ids) > self.max_length:
-                overflow = len(input_ids) - self.max_length
-                # don't cut BOS
-                cut_from = 1 if (self.bos_id >= 0) else 0
-                cut_to = min(cut_from + overflow, assistant_start_idx)  # never trim into assistant
-                input_ids = input_ids[:cut_from] + input_ids[cut_to:]
-                assistant_start_idx = max(assistant_start_idx - (cut_to - cut_from), 0)
-                input_ids = input_ids[: self.max_length]
-
-            # Labels: mask user region
-            labels = [-100] * len(input_ids)
-            for i in range(assistant_start_idx, len(input_ids)):
-                labels[i] = input_ids[i]
-
-            # Weights: default 0.0 for user region, 1.0 for assistant region
-            weights = [0.0] * assistant_start_idx + [1.0] * (len(input_ids) - assistant_start_idx)
-
-            # Boost weights for "commands" spans
+        print(f"🔄 Processing {len(self.data)} samples...")
+        
+        for i, ex in enumerate(self.data):
+            # Progress indicator to detect hanging
+            if i % 1000 == 0 and i > 0:
+                print(f"   → Processed {i}/{len(self.data)} samples...")
+            
             try:
-                # Build mapping from char->token index for resp_text only
-                resp_only_ids, char_offsets = self._charpos_to_token_index_lookup(resp_text)
-                # Translate resp-only token indices into full input_ids indices
-                for (cs, ce) in self._find_commands_char_spans(resp_text):
-                    t0 = self._char_to_token_index(char_offsets, cs)
-                    t1 = self._char_to_token_index(char_offsets, ce)
-                    start = assistant_start_idx + t0
-                    end = assistant_start_idx + t1
-                    for k in range(max(start, assistant_start_idx), min(end, len(input_ids))):
-                        if labels[k] != -100:
-                            weights[k] = float(self.COMMANDS_WEIGHT)
-            except Exception:
-                # If anything fails, keep baseline weights (still helpful)
-                pass
+                prompt = ex.get("prompt", "")
+                response_obj = ex.get("response", {})
 
-            samples.append({
-                "input_ids": torch.tensor(input_ids, dtype=torch.long),
-                "labels": torch.tensor(labels, dtype=torch.long),
-                "weights": torch.tensor(weights, dtype=torch.float32),
-            })
+                user_text, asst_head, resp_text = self._wrap_texts(prompt, response_obj)
+
+                # Tokenize parts separately
+                user_ids = self._tokenize(user_text)
+                asst_head_ids = self._tokenize(asst_head)
+                resp_ids = self._tokenize(resp_text)
+
+                # Compose with BOS/EOS
+                input_ids: List[int] = []
+                if self.bos_id >= 0:
+                    input_ids.append(self.bos_id)
+                input_ids.extend(user_ids)
+                input_ids.extend(asst_head_ids)
+                assistant_start_idx = len(input_ids)  # labels start here
+                input_ids.extend(resp_ids)
+                if self.eos_id >= 0:
+                    input_ids.append(self.eos_id)
+
+                # Truncate (prefer trimming user side; keep assistant content)
+                if len(input_ids) > self.max_length:
+                    overflow = len(input_ids) - self.max_length
+                    # don't cut BOS
+                    cut_from = 1 if (self.bos_id >= 0) else 0
+                    cut_to = min(cut_from + overflow, assistant_start_idx)  # never trim into assistant
+                    input_ids = input_ids[:cut_from] + input_ids[cut_to:]
+                    assistant_start_idx = max(assistant_start_idx - (cut_to - cut_from), 0)
+                    input_ids = input_ids[: self.max_length]
+
+                # Labels: mask user region
+                labels = [-100] * len(input_ids)
+                for j in range(assistant_start_idx, len(input_ids)):
+                    labels[j] = input_ids[j]
+
+                # Weights: default 0.0 for user region, 1.0 for assistant region
+                weights = [0.0] * assistant_start_idx + [1.0] * (len(input_ids) - assistant_start_idx)
+
+                # Boost weights for "commands" spans with error handling
+                try:
+                    # Only apply command weighting if response text is reasonably sized
+                    if len(resp_text) < 10000:  # Avoid processing huge responses
+                        # Build mapping from char->token index for resp_text only
+                        resp_only_ids, char_offsets = self._charpos_to_token_index_lookup(resp_text)
+                        # Translate resp-only token indices into full input_ids indices
+                        for (cs, ce) in self._find_commands_char_spans(resp_text):
+                            t0 = self._char_to_token_index(char_offsets, cs)
+                            t1 = self._char_to_token_index(char_offsets, ce)
+                            start = assistant_start_idx + t0
+                            end = assistant_start_idx + t1
+                            for k in range(max(start, assistant_start_idx), min(end, len(input_ids))):
+                                if labels[k] != -100:
+                                    weights[k] = float(self.COMMANDS_WEIGHT)
+                except Exception as e:
+                    # If command weighting fails, continue with baseline weights
+                    print(f"   ⚠️ Command weighting failed for sample {i}: {str(e)[:100]}")
+                    pass
+
+                samples.append({
+                    "input_ids": torch.tensor(input_ids, dtype=torch.long),
+                    "labels": torch.tensor(labels, dtype=torch.long),
+                    "weights": torch.tensor(weights, dtype=torch.float32),
+                })
+                
+            except Exception as e:
+                print(f"   ❌ Failed to process sample {i}: {str(e)[:100]}")
+                continue
 
         if samples:
             sample_input = samples[0]["input_ids"]
