@@ -628,9 +628,11 @@ class Opal:
                 # Move input and targ`et tensors to the specified device
                 input_ids = input_ids.to(device, non_blocking=True)
                 targets = targets.to(device, non_blocking=True)
+                if weights is not None:
+                    weights = weights.to(device, non_blocking=True)
 
                 # Calculate loss for this batch
-                loss = self.calc_loss_batch(input_ids, targets, model, device)
+                loss = self.calc_loss_batch(input_ids, targets, weights, model, device)
                 
                 # Scale loss by gradient accumulation steps to get the average
                 loss = loss / gradient_accumulation_steps
