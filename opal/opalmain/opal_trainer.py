@@ -502,7 +502,10 @@ class Opal:
                 sorted_indices_to_remove[..., 0] = 0  # Always keep the highest probability token
 
                 # Set logits of removed tokens to -inf
-                logits[sorted_indices[sorted_indices_to_remove]] = float("-inf")
+                # Set logits of removed tokens to -inf (batched-safe)
+                indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)
+                indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
+                logits = logits.masked_fill(indices_to_remove, float("-inf"))
 
             # Choose next token
             if temperature > 0.0:
