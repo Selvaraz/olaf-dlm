@@ -610,6 +610,11 @@ class Opal:
             
         gradient_accumulation_steps = self.config.get("gradient_accumulation_steps", default_accumulation)
 
+        # 🚨 CRITICAL FIX: Force disable mixed precision for fine-tuning to prevent CUDA errors
+        if self.is_finetune:
+            use_mixed_precision = False
+            print(f"🔧 Mixed precision FORCED OFF for fine-tuning stability")
+        
         scaler = get_scaler() if use_mixed_precision else None
 
         # FINETUNE_PH2: Adaptive Warmup - both pretraining and fine-tuning benefit from warmup
@@ -1845,19 +1850,23 @@ class Opal:
                     val_file.write(json.dumps(item) + '\n')
                 val_file_path = val_file.name
     
+            # 🚨 CRITICAL FIX: Force safe settings for fine-tuning to prevent CUDA errors
+            safe_num_workers = 0 if self.is_finetune else TRAINING_CONFIG["num_workers"]
+            print(f"🔧 Using {safe_num_workers} workers for {'fine-tuning' if self.is_finetune else 'pretraining'}")
+            
             training_loader = self.createOpalFinetuneDataLoader(
                 data_jsonl=train_file_path,
                 batch_size=batch_size,
                 max_length=config["context_length"],
                 shuffle=False,
-                num_workers=TRAINING_CONFIG["num_workers"]
+                num_workers=safe_num_workers  # 🚨 Force 0 for fine-tuning
             )
             val_loader = self.createOpalFinetuneDataLoader(
                 data_jsonl=val_file_path,
                 batch_size=batch_size,
                 max_length=config["context_length"],
                 shuffle=False,
-                num_workers=TRAINING_CONFIG["num_workers"]
+                num_workers=safe_num_workers  # 🚨 Force 0 for fine-tuning
             )
     
             # Clean up temporary files after use
