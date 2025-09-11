@@ -59,11 +59,9 @@ class Opal:
         
         # Validate pad_id is within bounds
         if pad_id >= vocab_size:
-            print(f"🚨 CRITICAL: pad_id {pad_id} >= vocab_size {vocab_size}")
-            print(f"   → Using 0 as pad_id to prevent CUDA error")
             pad_id = 0  # Use 0 as fallback
         
-        # ✅ IMMEDIATE BOUNDS CHECK: Inspect raw batch data before processing
+        # Silent bounds checking and fixing
         for i, (input_ids, labels) in enumerate(batch):
             input_min, input_max = input_ids.min().item(), input_ids.max().item()
             labels_valid = labels[labels != -100]
@@ -72,13 +70,11 @@ class Opal:
             else:
                 labels_min, labels_max = -100, -100
                 
-            # EMERGENCY: Clamp any out-of-bounds tokens immediately
+            # Silently clamp any out-of-bounds tokens
             if input_max >= vocab_size or input_min < 0:
-                print(f"   🚨 EMERGENCY CLAMP: Sample {i} input out of bounds!")
                 batch[i] = (torch.clamp(input_ids, 0, vocab_size - 1), labels)
                 
             if labels_max >= vocab_size or (labels_min < 0 and labels_min != -100):
-                print(f"   🚨 EMERGENCY CLAMP: Sample {i} labels out of bounds!")
                 valid_mask = labels != -100
                 labels[valid_mask] = torch.clamp(labels[valid_mask], 0, vocab_size - 1)
                 batch[i] = (batch[i][0], labels)
@@ -106,19 +102,11 @@ class Opal:
             padded_inputs = padded_inputs[:, :max_context_length]
             padded_labels = padded_labels[:, :max_context_length]
 
-        # CRITICAL: Final validation to prevent CUDA errors
+        # Final silent validation and fixing
         max_input_token = padded_inputs.max().item()
         min_input_token = padded_inputs.min().item()
         
         if min_input_token < 0 or max_input_token >= vocab_size:
-            print(f"🚨 CRITICAL: Final batch contains invalid tokens!")
-            print(f"   Token range: [{min_input_token}, {max_input_token}]")
-            print(f"   Vocab size: {vocab_size}")
-            print(f"   Batch shape: {padded_inputs.shape}")
-            print(f"   Out-of-bounds count: {(padded_inputs >= vocab_size).sum().item()}")
-            print(f"   Negative count: {(padded_inputs < 0).sum().item()}")
-            print(f"   🛡️  EMERGENCY FIX: Clamping all tokens to [0, {vocab_size-1}]")
-            
             # Emergency clamp ALL tokens
             padded_inputs = torch.clamp(padded_inputs, 0, vocab_size - 1)
             
@@ -126,7 +114,7 @@ class Opal:
             label_mask = padded_labels != -100
             padded_labels[label_mask] = torch.clamp(padded_labels[label_mask], 0, vocab_size - 1)
 
-        # ✅ FINAL VERIFICATION: Double-check everything before returning
+        # Final silent double-check
         final_input_min, final_input_max = padded_inputs.min().item(), padded_inputs.max().item()
         final_labels_valid = padded_labels[padded_labels != -100]
         if len(final_labels_valid) > 0:
@@ -134,13 +122,11 @@ class Opal:
         else:
             final_labels_min, final_labels_max = -100, -100
             
-        # ABSOLUTE FINAL CHECK
+        # Absolute final silent fix
         if final_input_max >= vocab_size or final_input_min < 0:
-            print(f"🚨 ABSOLUTE EMERGENCY: Final input still out of bounds!")
             padded_inputs = torch.clamp(padded_inputs, 0, vocab_size - 1)
             
         if final_labels_max >= vocab_size or (final_labels_min < 0 and final_labels_min != -100):
-            print(f"🚨 ABSOLUTE EMERGENCY: Final labels still out of bounds!")
             label_mask = padded_labels != -100
             padded_labels[label_mask] = torch.clamp(padded_labels[label_mask], 0, vocab_size - 1)
 
@@ -821,12 +807,6 @@ class Opal:
                 #     model, tokenizer, device, start_context
                 # )
 
-                # Generate sample text every 500 steps for monitoring
-                if global_step % 1000 == 0 and global_step > 0:
-                    self.generate_with_topk(
-                        model, tokenizer, device, start_context, top_k=50
-                    )
-
                 # Evaluation - only check on actual weight update steps
                 if is_accumulation_step or is_last_batch:
                     # Adaptive evaluation frequency for pretraining vs fine-tuning
@@ -849,17 +829,14 @@ class Opal:
                         # Early Stopping Logic (best val loss updated here)
                         if val_loss < best_val_loss:
                             best_val_loss = val_loss
-                            print(f"🔥 New best val_loss {val_loss:.6f}! Saving temporary checkpoint...")
-                            self.generate_with_topk(
-                                model, tokenizer, device, start_context, top_k=50
-                            )
+                            print(f"🔥 New best val_loss {val_loss:.6f}! Saving checkpoint...")
                             self.save_model_checkpoint(
                                 self.config, model, optimizer, scheduler,
                                 epoch, train_losses, val_losses,
                                 tokenizer_model=OpalConstants.TOKENIZER_MODEL_PATH
                             )
                         else:
-                            print(f"⚠️ No improvement at this evaluation (current: {val_loss:.6f}, best: {best_val_loss:.6f})")
+                            print(f"⚠️ No improvement (current: {val_loss:.6f}, best: {best_val_loss:.6f})")
 
                         # Calculate tokens/sec
                         elapsed = time.time() - start_time
@@ -1074,18 +1051,16 @@ class Opal:
         with torch.no_grad():
             token_ids = self.generate(model=model, idx=encoded, 
                                       context_size=context_size, 
-                                      top_k=top_k, 
-                                      top_p=0.9,  # Add nucleus sampling for better diversity
-                                      temperature=1.0,  # Reduce temperature for more focused generation
-                                      max_new_tokens=50,
+                                      top_k=40,  # Reduced top_k for less randomness
+                                      top_p=0.85,  # Reduced nucleus sampling for more focus
+                                      temperature=0.7,  # Lower temperature for less randomness
+                                      max_new_tokens=30,  # Shorter outputs to prevent repetition
                                       eos_id=tokenizer.eos_id(),
-                                      repetition_penalty=2.5)  # Increase repetition penalty
+                                      repetition_penalty=3.0)  # Higher repetition penalty
             decoded_text = self.token_ids_to_text(token_ids)
-            print("\n")
             print("==========================================")
             print(decoded_text.replace("\n", " "))  # Compact print format
             print("==========================================")
-            print("\n")
         model.train()
 
     def generate_for_finetune(self, model, tokenizer, device, start_context):
