@@ -1278,9 +1278,18 @@ class Opal:
             # Reduce the number of batches to match the total number of batches in the data loader
             # if num_batches exceeds the number of batches in the data loader
             num_batches = min(num_batches, len(data_loader))
-        for i, (input_batch, target_batch) in enumerate(data_loader):
+        for i, batch in enumerate(data_loader):
             if i < num_batches:
-                loss = self.calc_loss_batch(input_batch, target_batch, model, device)
+                # Handle both 2-value and 3-value returns from dataset
+                if len(batch) == 3:
+                    input_batch, target_batch, weights = batch
+                    # For now, ignore weights in loss calculation during evaluation
+                    loss = self.calc_loss_batch(input_batch, target_batch, None, model, device)
+                elif len(batch) == 2:
+                    input_batch, target_batch = batch
+                    loss = self.calc_loss_batch(input_batch, target_batch, None, model, device)
+                else:
+                    raise ValueError(f"Unexpected batch format: expected 2 or 3 values, got {len(batch)}")
                 total_loss += loss.item()
             else:
                 break
