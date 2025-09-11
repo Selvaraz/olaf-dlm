@@ -177,7 +177,7 @@ def set_finetune_mode(enable_finetune=True):
 USE_GPU = is_gpu_available()  # Change this if you want to force CPU/GPU
 
 # Configuration selection - set FINETUNE_MODE=True when fine-tuning
-FINETUNE_MODE = False  # ✅ Set this to True when fine-tuning
+FINETUNE_MODE = True  # ✅ Set this to True when fine-tuning
 
 if FINETUNE_MODE:
     # Use fine-tuning optimized configs
@@ -202,3 +202,6 @@ for _cfg_name, _cfg in list(globals().items()):
         _cfg.setdefault("kv_heads", 1)         # MQA
         _cfg.setdefault("use_rope", True)      # Rotary pos embeddings
         _cfg.setdefault("tie_embeddings", True)
+
+OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_FINETUNE_45M
+TRAINING_CONFIG = TRAINING_CONFIG

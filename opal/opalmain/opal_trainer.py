@@ -879,7 +879,7 @@ class Opal:
             if 'learning_rate' in self.config:
                 print(f"🔍 DEBUG: self.config['learning_rate']: {self.config['learning_rate']}")
             print(f"🔍 DEBUG: self.config type: {type(self.config)}")
-            print(f"Model learning rate {self.config.get('learning_rate', 0):.6f}")
+            print(f"📊 Model learning rate: {self.config.get('learning_rate', 0):.2e}")
 
             # Create a progress bar for the training data
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
