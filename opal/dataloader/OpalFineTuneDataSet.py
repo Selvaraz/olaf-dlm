@@ -254,16 +254,16 @@ class OpalFinetuneDataset(Dataset):
                     continue
 
             # Debug: Print first few samples to verify format
-            if len(samples) < 3:  # Only for first few samples
-                print(f"   → Sample {len(samples) + 1} debug:")
-                print(f"     Prompt: {prompt[:100]}...")
-                print(f"     Response length: {len(response_text)} chars")
-                print(f"     Full text: {full_text[:150]}...")
-                print(f"     Input IDs length: {len(input_ids)}, Prompt boundary: {prompt_len}")
+            # if len(samples) < 3:  # Only for first few samples
+            #     print(f"   → Sample {len(samples) + 1} debug:")
+            #     print(f"     Prompt: {prompt[:100]}...")
+            #     print(f"     Response length: {len(response_text)} chars")
+            #     print(f"     Full text: {full_text[:150]}...")
+            #     print(f"     Input IDs length: {len(input_ids)}, Prompt boundary: {prompt_len}")
                 
-                # Check if response_text is properly structured JSON
-                if isinstance(item["response"], dict):
-                    print(f"     JSON keys: {list(item['response'].keys())}")
+            #     # Check if response_text is properly structured JSON
+            #     if isinstance(item["response"], dict):
+            #         print(f"     JSON keys: {list(item['response'].keys())}")
 
             samples.append({
                 "input_ids": torch.tensor(input_ids, dtype=torch.long),
