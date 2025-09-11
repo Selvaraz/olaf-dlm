@@ -92,19 +92,19 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
     "emb_dim": 512,               # ↑ better token representations
     "n_heads": 8,                 # scales well with emb_dim
     "n_layers": 12,               # ↑ more reasoning depth
-    "drop_rate": 0.2, 
-    "transformer_drop_rate": 0.2,   
-    "attention_drop_rate": 0.15,
+    "drop_rate": 0.1,             # 🔧 Reduced from 0.2 - less aggressive dropout
+    "transformer_drop_rate": 0.15, # 🔧 Reduced from 0.2
+    "attention_drop_rate": 0.1,   # 🔧 Reduced from 0.15
     "qkv_bias": True,
-    "num_epoch": 20, 
-    "learning_rate": 1e-7,
-    "weight_decay": 0.05,     
-    "warmup_steps": 500, 
-    "early_stopping_patience": 5,
+    "num_epoch": 3,               # 🔧 CRITICAL: Reduced from 20 to prevent overfitting
+    "learning_rate": 1e-5,        # 🔧 CRITICAL: Increased from 1e-7 (100x) for proper convergence
+    "weight_decay": 0.01,         # 🔧 Reduced from 0.05 - less aggressive regularization
+    "warmup_steps": 200,          # 🔧 Adjusted for 3 epochs instead of 20
+    "early_stopping_patience": 2, # 🔧 Reduced from 5 - quicker stopping
     "persistent_workers": False,
     "gradient_accumulation_steps": 4, 
     "lr_scheduler": "cosine",
-    "max_grad_norm": 0.5,   
+    "max_grad_norm": 1.0,         # 🔧 Increased from 0.5 - allow larger gradients
     "kv_heads" : 1,                # MQA
     "use_rope": True,              # Rotary pos embeddings
     "tie_embeddings": True,        # Tie input/output embeddings
@@ -119,10 +119,10 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
 
 _TRAINING_CONFIG_GPU = {
     "device": get_device(),
-    "batch_size": 32,
-    "num_workers": 8,
-    "mixed_precision": True, 
-    "gradient_accumulation_steps": 1
+    "batch_size": 8,              # 🔧 Reduced from 32 for fine-tuning stability
+    "num_workers": 4,             # 🔧 Reduced from 8 for stability
+    "mixed_precision": False,     # 🔧 Disabled for fine-tuning stability
+    "gradient_accumulation_steps": 4  # 🔧 Matches model config
 }
 
 OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_FINETUNE_45M

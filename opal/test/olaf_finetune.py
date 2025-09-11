@@ -182,7 +182,7 @@ def model_pretrain_test(start_fresh=False, opal_instance=None):
             start_fresh=start_fresh,
             eval_iter=eval_iter,
             eval_freq=eval_freq,
-            start_context="Show me the IP routing table configuration",
+            start_context="<USER> Show me the IP routing table configuration <ASSISTANT>",
         )
         
         print(f"\n🎉 Fine-tuning completed successfully!")
