@@ -156,9 +156,12 @@ def set_finetune_mode(enable_finetune=True):
         TRAINING_CONFIG = {
             **(_TRAINING_CONFIG_GPU if USE_GPU else _TRAINING_CONFIG_CPU),
             "batch_size": 4 if USE_GPU else 1,  # 🔧 Even smaller batches for stability
+            "mixed_precision": False,  # 🚨 DISABLED: Mixed precision can cause CUDA index errors
+            "num_workers": 0,  # 🚨 DISABLED: Prevent multiprocessing conflicts
         }
         print(f"   → Model: {OPAL_MODEL_CONFIG['emb_dim']}D, LR: {OPAL_MODEL_CONFIG['learning_rate']}")
         print(f"   → Batch size: {TRAINING_CONFIG['batch_size']}, Epochs: {OPAL_MODEL_CONFIG['num_epoch']}")
+        print(f"   → Mixed precision: {TRAINING_CONFIG['mixed_precision']} (disabled for stability)")
     else:
         print("🚀 Switching to PRETRAINING configuration...")
         OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_45M
@@ -179,10 +182,12 @@ FINETUNE_MODE = False  # ✅ Set this to True when fine-tuning
 if FINETUNE_MODE:
     # Use fine-tuning optimized configs
     OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_FINETUNE_45M
-    # 🔧 FIXED: Reduce batch size for fine-tuning to prevent overfitting
+    # 🔧 FIXED: Conservative settings to prevent CUDA errors
     TRAINING_CONFIG = {
         **(_TRAINING_CONFIG_GPU if USE_GPU else _TRAINING_CONFIG_CPU),
         "batch_size": 8 if USE_GPU else 2,  # 🔧 Smaller batches for stable fine-tuning
+        "mixed_precision": False,  # 🚨 DISABLED: Mixed precision can cause CUDA index errors
+        "num_workers": 0,  # 🚨 DISABLED: Prevent multiprocessing conflicts
     }
 else:
     # Use pretraining configs  
