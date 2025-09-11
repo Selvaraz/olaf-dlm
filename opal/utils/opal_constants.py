@@ -2,6 +2,10 @@
 class OpalConstants:
     """Class to hold all constants used in Opal"""
 
+    # RUNTIME PATHS FOR LOCAL TESTING (BACKUP)
+    LOCAL_CHECKPOINT_PATH = "/Users/selvmani/OLAF/checkpoints/45M/checkpoints/20250909/20250908_141411"
+    LOCAL_TOKENIZER_PATH = f"{LOCAL_CHECKPOINT_PATH}/opal_tokenizer.model"
+    
     # RUNTIME PATHS
     #SYSTEM_ROOT_PATH = "/home/selvaraj/"
     SYSTEM_ROOT_PATH= ""

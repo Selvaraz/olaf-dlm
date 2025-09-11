@@ -225,19 +225,24 @@ class OpalFinetuneDataset(Dataset):
                     ]
                     print(f"   → Prompt IDs fixed ✅")
                 
-            # Truncate if too long
+            # Truncate if too long FIRST - before creating labels
             if len(input_ids) > self.max_length:
                 input_ids = input_ids[:self.max_length]
                 
             prompt_len = min(len(prompt_ids), len(input_ids))
 
-            # Apply the masks for the prompt tokens, so our DLM does not 
-            # Learn about the prompt :-D
-            labels = [-100] * prompt_len + input_ids[prompt_len:]
+            # CRITICAL FIX: Create labels array with SAME length as input_ids
+            # The bug was: labels = [-100] * prompt_len + input_ids[prompt_len:]
+            # This creates labels longer than input_ids when input_ids is truncated
+            labels = []
+            for i, token_id in enumerate(input_ids):
+                if i < prompt_len:
+                    labels.append(-100)  # Mask prompt tokens
+                else:
+                    labels.append(token_id)  # Keep response tokens
             
-            # Ensure labels are also truncated to match input_ids length
-            if len(labels) > self.max_length:
-                labels = labels[:self.max_length]
+            # VERIFY: labels and input_ids must have EXACTLY the same length
+            assert len(labels) == len(input_ids), f"Length mismatch: input_ids={len(input_ids)}, labels={len(labels)}"
 
             # CRITICAL: Validate label token IDs to prevent CUDA errors
             valid_label_tokens = [l for l in labels if l != -100]
