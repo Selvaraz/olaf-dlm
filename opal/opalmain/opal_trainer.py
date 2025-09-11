@@ -2079,7 +2079,7 @@ class Opal:
                 data_jsonl=train_file_path,
                 batch_size=batch_size,
                 max_length=config["context_length"],
-                shuffle=False,
+                shuffle=True,
                 num_workers=safe_num_workers  # 🚨 Force 0 for fine-tuning
             )
             val_loader = self.createOpalFinetuneDataLoader(
