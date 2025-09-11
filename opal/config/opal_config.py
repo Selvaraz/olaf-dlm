@@ -102,7 +102,7 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
     "warmup_steps": 500, 
     "early_stopping_patience": 5,
     "persistent_workers": False,
-    "gradient_accumulation_steps": 2, 
+    "gradient_accumulation_steps": 4, 
     "lr_scheduler": "cosine",
     "max_grad_norm": 0.5,   
     "kv_heads" : 1,                # MQA

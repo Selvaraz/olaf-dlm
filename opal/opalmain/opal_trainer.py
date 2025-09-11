@@ -1375,6 +1375,7 @@ class Opal:
             {"top_k": 25, "top_p": 0.8, "temp": 0.7, "rep_penalty": 3.5, "name": "Conservative"},
             {"top_k": 40, "top_p": 0.9, "temp": 1.0, "rep_penalty": 2.5, "name": "Balanced"},
             {"top_k": 60, "top_p": 0.95, "temp": 1.2, "rep_penalty": 2.0, "name": "Creative"},
+            {"top_k": 50, "top_p": 0.92, "temp": 0.8, "rep_penalty": 2.0, "name": "Custom"},
         ]
         
         model.eval()
