@@ -2011,8 +2011,15 @@ class Opal:
         # ----------------------------------------
         print(f"Creating adaptive optimizer with learning rate: {lr}, {self.config.get('learning_rate', 0)}")
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-        if optimizer_state_dict:
+        
+        # 🔧 CRITICAL FIX: For fine-tuning, do NOT load optimizer state to ensure fresh learning rate
+        if optimizer_state_dict and not is_finetune:
+            print("✅ Loading optimizer state from checkpoint (pretraining mode)")
             optimizer.load_state_dict(optimizer_state_dict)
+        elif is_finetune:
+            print("🔧 Fine-tuning mode: Starting with fresh optimizer state (preserving new learning rate)")
+        else:
+            print("✅ No optimizer state to load (training from scratch)")
 
         # ----------------------------------------
         # Data Loading
@@ -2131,8 +2138,15 @@ class Opal:
         )
 
         print("✅ Created learning rate scheduler")
-        if scheduler_state_dict:
+        
+        # 🔧 CRITICAL FIX: For fine-tuning, do NOT load scheduler state to ensure fresh learning schedule
+        if scheduler_state_dict and not is_finetune:
+            print("✅ Loading scheduler state from checkpoint (pretraining mode)")
             cosine_scheduler.load_state_dict(scheduler_state_dict)
+        elif is_finetune:
+            print("🔧 Fine-tuning mode: Starting with fresh scheduler state (preserving new learning schedule)")
+        else:
+            print("✅ No scheduler state to load (training from scratch)")
 
         # ----------------------------------------
         # Training Loop
