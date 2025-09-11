@@ -37,17 +37,11 @@ print(f"   → Checkpoint dir: {OpalConstants.CHECKPOINT_DIR} - {'✅' if os.pat
 # Create checkpoint directory if it doesn't exist
 os.makedirs(OpalConstants.CHECKPOINT_DIR, exist_ok=True)
 
-# Create Opal instance with tokenizer
-print("🔧 Creating OPAL trainer instance...")
-opalInstance = Opal(
-    config=OPAL_MODEL_CONFIG, 
-    tokenizer=sp, 
-    is_finetune=True, 
-    finetune_data_path=OpalConstants.FINETUNE_TEST_DATA_PATH
-)
-
 device = TRAINING_CONFIG["device"]
 print(f"🔧 Using device: {device}")
+
+# Note: Opal instance will be created after command line argument parsing
+# to ensure it gets the correct config values
 
 def validate_dataset(data_path, num_samples=5):
     """Validate the fine-tuning dataset format and content"""
@@ -94,8 +88,11 @@ def validate_dataset(data_path, num_samples=5):
         print(f"❌ Dataset validation failed: {e}")
         raise
 
-def model_pretrain_test(start_fresh=False):
+def model_pretrain_test(start_fresh=False, opal_instance=None):
     """Main fine-tuning function with improved error handling and monitoring"""
+    
+    if opal_instance is None:
+        raise ValueError("opal_instance must be provided")
     
     # Validate dataset first
     validate_dataset(OpalConstants.FINETUNE_TEST_DATA_PATH, num_samples=10)
@@ -164,7 +161,7 @@ def model_pretrain_test(start_fresh=False):
     print(f"Evaluation iterations    : {eval_iter}")
     
     try:
-        opalInstance.train_and_save_model(
+        opal_instance.train_and_save_model(
             model_class=OpalGPT,
             config=OPAL_MODEL_CONFIG,
             device=device,
@@ -257,6 +254,22 @@ if __name__ == "__main__":
     else:
         print(f"🔧 Using config learning rate: {OPAL_MODEL_CONFIG['learning_rate']}")
     
+    # 🔧 CRITICAL FIX: Create Opal instance AFTER config overrides to ensure correct config
+    print("🔧 Creating OPAL trainer instance with final config...")
+    opalInstance = Opal(
+        config=OPAL_MODEL_CONFIG, 
+        tokenizer=sp, 
+        is_finetune=True, 
+        finetune_data_path=OpalConstants.FINETUNE_TEST_DATA_PATH
+    )
+    print(f"✅ Opal instance created with learning rate: {opalInstance.config['learning_rate']}")
+    
+    # Debug: Confirm the Opal instance config
+    print(f"\n🔍 OPAL INSTANCE CONFIG VERIFICATION:")
+    print(f"   → opalInstance.config['learning_rate']: {opalInstance.config['learning_rate']}")
+    print(f"   → OPAL_MODEL_CONFIG['learning_rate']: {OPAL_MODEL_CONFIG['learning_rate']}")
+    print(f"   → Config objects match: {opalInstance.config is OPAL_MODEL_CONFIG}")
+    
     # Print startup information
     print(f"🏃 Running on device: {device}")
     print(f"🏃 GPU available: {torch.cuda.is_available()}")
@@ -266,7 +279,7 @@ if __name__ == "__main__":
     
     # Run the training
     try:
-        model_pretrain_test(start_fresh=args.start_fresh)
+        model_pretrain_test(start_fresh=args.start_fresh, opal_instance=opalInstance)
     except KeyboardInterrupt:
         print(f"\n🛑 Training interrupted by user")
     except Exception as e:
