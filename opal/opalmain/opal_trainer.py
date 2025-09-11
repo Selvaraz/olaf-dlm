@@ -570,7 +570,7 @@ class Opal:
         if self.is_finetune:
             # Fine-tuning: lighter warmup (2% of total steps or configured warmup_steps)
             #warmup_steps = min(self.config.get("warmup_steps", int(total_steps * 0.02)), int(total_steps * 0.1))
-            warmup_steps =  min(self.config.get("warmup_steps", 100), 100)
+            warmup_steps =  int(total_steps * 0.03)
         else:
             # Pretraining: standard warmup (5% of total steps)
             warmup_steps = int(total_steps * 0.05)

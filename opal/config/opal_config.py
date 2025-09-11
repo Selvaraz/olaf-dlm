@@ -97,7 +97,7 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
     "attention_drop_rate": 0.1,   # 🔧 Reduced from 0.15
     "qkv_bias": True,
     "num_epoch": 2,               # 🔧 ULTRA-CONSERVATIVE: Reduced from 3 to prevent forgetting
-    "learning_rate": 1e-7,        # 🔧 CRITICAL: Much lower to prevent catastrophic forgetting
+    "learning_rate": 5e-5,        # 🔧 CRITICAL: Much lower to prevent catastrophic forgetting
     "weight_decay": 0.005,        # 🔧 Reduced from 0.01 - minimal regularization
     "warmup_steps": 100,          # 🔧 Adjusted for 2 epochs
     "early_stopping_patience": 1, # 🔧 Very quick stopping if overfitting
@@ -122,7 +122,7 @@ _TRAINING_CONFIG_GPU = {
     "device": get_device(),
     "batch_size": 4,              # 🔧 Even smaller batches for ultra-conservative training
     "num_workers": 2,             # 🔧 Reduced further for stability
-    "mixed_precision": False,     # 🔧 Disabled for fine-tuning stability
+    "mixed_precision": True,     # 🔧 Disabled for fine-tuning stability
     "gradient_accumulation_steps": 8  # 🔧 Matches model config for effective batch size 32
 }
 
