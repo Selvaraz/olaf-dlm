@@ -1821,7 +1821,7 @@ class Opal:
                 val_file_path = val_file.name
     
             # 🚨 CRITICAL FIX: Force safe settings for fine-tuning to prevent CUDA errors
-            safe_num_workers = 0 if self.is_finetune else TRAINING_CONFIG["num_workers"]
+            safe_num_workers = TRAINING_CONFIG["num_workers"]
             print(f"🔧 Using {safe_num_workers} workers for {'fine-tuning' if self.is_finetune else 'pretraining'}")
             
             training_loader = self.createOpalFinetuneDataLoader(
