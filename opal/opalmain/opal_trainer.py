@@ -1365,9 +1365,7 @@ class Opal:
         # ----------------------------------------
         # Load Checkpoint if available
         # ----------------------------------------
-        # During fine tune we must need the previous chekpoint
-        if self.is_finetune and os.path.exists
-
+        # During fine tune we must need the previous checkpoint
 
         try:
             print(f"Attempting to load model checkpoint from {checkpoint_path}...")
