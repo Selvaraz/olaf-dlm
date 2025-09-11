@@ -965,12 +965,12 @@ class Opal:
                     global_step += 1
                     
                     # Generate sample every 1000 iterations to monitor quality (AFTER increment)
-                    if global_step > 0 and global_step % 1000 == 0:
-                        print(f"\n🎯 === GENERATION SAMPLE AT STEP {global_step} ===")
-                        self.generate_with_topk(
-                            model, tokenizer, device, start_context, top_k=50
-                        )
-                        print(f"🎯 ============================================\n")
+                    # if global_step > 0 and global_step % 1000 == 0:
+                    #     print(f"\n🎯 === GENERATION SAMPLE AT STEP {global_step} ===")
+                    #     self.generate_with_topk(
+                    #         model, tokenizer, device, start_context, top_k=50
+                    #     )
+                    #     print(f"🎯 ============================================\n")
                     
                     # Update progress bar with accumulated loss
                     if hasattr(loss, 'item'):
