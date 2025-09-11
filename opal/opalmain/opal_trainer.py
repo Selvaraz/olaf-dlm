@@ -459,33 +459,14 @@ class Opal:
             logits = model_output["logits"] if isinstance(model_output, dict) else model_output
             logits = logits[:, -1, :]  # ✅ Take only last token logits
 
-            # Improved repetition penalty - penalize recently repeated tokens more heavily
+            # 🚨 SIMPLIFIED: Basic repetition penalty to avoid complex tensor operations
             if repetition_penalty > 1.0:
-                # Get the last 20 tokens for more focused repetition penalty
-                recent_tokens = idx[0, -min(20, idx.shape[1]):].tolist()
-                token_counts = {}
-                
-                # Count occurrences of each token in recent history
-                for i, token in enumerate(recent_tokens):
-                    if token not in token_counts:
-                        token_counts[token] = []
-                    token_counts[token].append(i)
-                
-                # Apply stronger penalty for more frequent and recent tokens
-                for token, positions in token_counts.items():
-                    if len(positions) > 1:  # Only penalize if token appears multiple times
-                        # Stronger penalty for more frequent tokens
-                        frequency_penalty = repetition_penalty ** len(positions)
-                        # Additional penalty for very recent repetitions
-                        most_recent_pos = max(positions)
-                        if most_recent_pos >= len(recent_tokens) - 3:  # Last 3 tokens
-                            frequency_penalty *= 1.5
-                        
-                        # Apply the penalty
-                        if logits[0, token] > 0:
-                            logits[0, token] /= frequency_penalty
-                        else:
-                            logits[0, token] *= frequency_penalty
+                # Simple approach: penalize all tokens that appeared in the sequence
+                for token in set(idx[0].tolist()):
+                    if logits[0, token] > 0:
+                        logits[0, token] /= repetition_penalty
+                    else:
+                        logits[0, token] *= repetition_penalty
 
             #  Apply temperature scaling (makes probabilities sharper or smoother)
             if temperature > 0.0:
@@ -602,9 +583,9 @@ class Opal:
         use_mixed_precision = TRAINING_CONFIG.get("mixed_precision", False)
         max_grad_norm = self.config.get("max_grad_norm", 1.0)
         
-        # Adaptive gradient accumulation: higher for fine-tuning complex data
+        # 🚨 CRITICAL FIX: Use LOWER gradient accumulation for fine-tuning to prevent CUDA errors
         if self.is_finetune:
-            default_accumulation = 8  # Higher for fine-tuning with complex JSON
+            default_accumulation = 1  # 🚨 REDUCED: Lower for fine-tuning stability
         else:
             default_accumulation = 4  # Standard for pretraining
             
