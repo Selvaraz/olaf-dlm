@@ -1238,11 +1238,45 @@ class Opal:
             if loss is None:
                 # Fallback if loss not computed in forward()
                 logits = model_output["logits"]
+                
+                # ✅ CRITICAL DEBUG: Check logits dimensions before loss computation
+                print(f"🔍 Loss computation debug:")
+                print(f"   Logits shape: {logits.shape}")
+                print(f"   Target shape: {target_batch.shape}")
+                print(f"   Logits vocab dimension: {logits.size(-1)}")
+                print(f"   Expected vocab size: {self.config.get('vocab_size', 'MISSING')}")
+                print(f"   Target range: [{target_batch.min().item()}, {target_batch.max().item()}]")
+                
+                # Check if vocab dimensions match
+                expected_vocab = self.config.get('vocab_size', 12000)
+                actual_vocab = logits.size(-1)
+                if actual_vocab != expected_vocab:
+                    print(f"🚨 CRITICAL MISMATCH: Logits vocab={actual_vocab} != expected={expected_vocab}")
+                    print(f"   This indicates model was trained with different vocab size!")
+                    print(f"   🛡️  EMERGENCY: Cannot fix vocab size mismatch at runtime")
+                    raise ValueError(f"Model vocab size mismatch: {actual_vocab} vs {expected_vocab}")
+                
                 loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
                 loss = loss_fct(logits.view(-1, logits.size(-1)), target_batch.view(-1))
         else:
             # If model returns only logits (legacy behavior)
             logits = model_output
+            
+            # ✅ CRITICAL DEBUG: Check logits dimensions before loss computation  
+            print(f"🔍 Loss computation debug (legacy path):")
+            print(f"   Logits shape: {logits.shape}")
+            print(f"   Target shape: {target_batch.shape}")
+            print(f"   Logits vocab dimension: {logits.size(-1)}")
+            print(f"   Expected vocab size: {self.config.get('vocab_size', 'MISSING')}")
+            print(f"   Target range: [{target_batch.min().item()}, {target_batch.max().item()}]")
+            
+            # Check if vocab dimensions match
+            expected_vocab = self.config.get('vocab_size', 12000)
+            actual_vocab = logits.size(-1)
+            if actual_vocab != expected_vocab:
+                print(f"🚨 CRITICAL MISMATCH: Logits vocab={actual_vocab} != expected={expected_vocab}")
+                raise ValueError(f"Model vocab size mismatch: {actual_vocab} vs {expected_vocab}")
+            
             loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
             loss = loss_fct(logits.view(-1, logits.size(-1)), target_batch.view(-1))
 
@@ -1446,6 +1480,39 @@ class Opal:
             config = checkpoint["config"]
             model = model_class(config).to(device)
             missing, unexpected = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+            
+            # ✅ CRITICAL DEBUG: Check for vocab size mismatches in loaded model
+            print(f"🔍 CHECKPOINT LOADING DEBUG:")
+            print(f"   Missing keys: {len(missing)} - {missing[:5] if missing else 'None'}")
+            print(f"   Unexpected keys: {len(unexpected)} - {unexpected[:5] if unexpected else 'None'}")
+            
+            # Check if embedding/output layers were properly loaded
+            embedding_loaded = not any('token_embeddings' in key or 'token_emb' in key for key in missing)
+            output_loaded = not any('out_head' in key or 'output' in key for key in missing)
+            
+            print(f"   Token embeddings loaded: {embedding_loaded}")
+            print(f"   Output head loaded: {output_loaded}")
+            
+            if not embedding_loaded:
+                print(f"🚨 CRITICAL: Token embeddings not loaded from checkpoint!")
+                print(f"   This indicates vocab size mismatch between checkpoint and current config")
+            if not output_loaded:
+                print(f"🚨 CRITICAL: Output head not loaded from checkpoint!")
+                print(f"   This indicates vocab size mismatch between checkpoint and current config")
+                
+            # Check actual model dimensions after loading
+            actual_emb_size = model.token_embeddings.num_embeddings if hasattr(model, 'token_embeddings') else 'N/A'
+            actual_out_size = model.out_head.out_features if hasattr(model, 'out_head') else 'N/A'
+            config_vocab = self.config.get('vocab_size', 'N/A')
+            
+            print(f"   After loading - Embedding size: {actual_emb_size}")
+            print(f"   After loading - Output size: {actual_out_size}")
+            print(f"   Config vocab size: {config_vocab}")
+            
+            if actual_emb_size != config_vocab or actual_out_size != config_vocab:
+                print(f"🚨 CONFIRMED VOCAB MISMATCH!")
+                print(f"   This WILL cause CUDA index out of bounds errors!")
+                print(f"   Solution: Train from scratch OR use matching checkpoint")
             print("❌ Missing keys:", missing)
             print("⚠️ Unexpected keys:", unexpected)
             optimizer_state_dict = checkpoint.get("optimizer_state_dict", None)

@@ -41,6 +41,19 @@ class OpalGPT(nn.Module):
 
         self.cfg = cfg
 
+        # ✅ CRITICAL DEBUG: Print actual model dimensions to detect vocab mismatches
+        print(f"🔍 MODEL INITIALIZATION DEBUG:")
+        print(f"   Config vocab_size: {cfg['vocab_size']}")
+        print(f"   Token embedding vocab size: {self.token_embeddings.num_embeddings}")
+        print(f"   Output head vocab size: {self.out_head.out_features}")
+        print(f"   Embedding dim: {cfg['emb_dim']}")
+        
+        # Check for mismatches
+        if self.token_embeddings.num_embeddings != cfg["vocab_size"]:
+            print(f"🚨 CRITICAL MISMATCH: Token embedding size != config vocab_size")
+        if self.out_head.out_features != cfg["vocab_size"]:
+            print(f"🚨 CRITICAL MISMATCH: Output head size != config vocab_size")
+
         self.apply(self._init_weights)
 
     # Initialize the weights of the model, the reason for this 
