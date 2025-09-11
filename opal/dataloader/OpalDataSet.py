@@ -68,5 +68,6 @@ class OpalDataset(Dataset):
     def __getitem__(self, idx):
         return (
             self.input_ids[idx],
-            self.target_ids[idx]
+            self.target_ids[idx],
+            (self.target_ids[idx] != -100).float()
         )

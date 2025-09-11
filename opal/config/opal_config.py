@@ -112,7 +112,8 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
     "pad_id": 0,                   # Safe padding token
     "bos_id": 1,                   # Beginning of sequence token (matches tokenizer training)
     "eos_id": 2,                   # End of sequence token (matches tokenizer training)
-    "unk_id": 3                    # Unknown token
+    "unk_id": 3,                    # Unknown token
+    "commands_weight": 3.0       # Weight boost for command tokens in fine-tuning
 }
 
 

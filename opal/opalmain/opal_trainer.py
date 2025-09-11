@@ -30,7 +30,7 @@ import sentencepiece as spm
 from tqdm import tqdm
 from ..export.opal_evaluator import evaluate_pytorch, evaluate_onnx
 from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR
-
+import torch.nn.functional as F
 #For TensorBoard logging
 from torch.utils.tensorboard import SummaryWriter
 # For weights and biases logging
@@ -48,89 +48,33 @@ class Opal:
         self.finetune_data_path = finetune_data_path
     
     def collate_finetune(self, batch):
-        """
-        Dynamically pads a batch of fine-tuning samples to the longest sequence.
-        This function is used by the DataLoader to pad input and label tensors
-        to a uniform size for the current batch.
-        """
-        # CRITICAL FIX: Ensure pad_id is within vocab bounds to prevent CUDA index errors
-        vocab_size = self.tokenizer.get_piece_size()
-        pad_id = self.tokenizer.pad_id() if self.tokenizer.pad_id() >= 0 else self.tokenizer.unk_id()
-        
-        # Validate pad_id is within bounds
-        if pad_id >= vocab_size:
-            pad_id = 0  # Use 0 as fallback
-        
-        # Silent bounds checking and fixing
-        for i, (input_ids, labels) in enumerate(batch):
-            input_min, input_max = input_ids.min().item(), input_ids.max().item()
-            labels_valid = labels[labels != -100]
-            if len(labels_valid) > 0:
-                labels_min, labels_max = labels_valid.min().item(), labels_valid.max().item()
-            else:
-                labels_min, labels_max = -100, -100
-                
-            # Silently clamp any out-of-bounds tokens
-            if input_max >= vocab_size or input_min < 0:
-                batch[i] = (torch.clamp(input_ids, 0, vocab_size - 1), labels)
-                
-            if labels_max >= vocab_size or (labels_min < 0 and labels_min != -100):
-                valid_mask = labels != -100
-                labels[valid_mask] = torch.clamp(labels[valid_mask], 0, vocab_size - 1)
-                batch[i] = (batch[i][0], labels)
-
-        # Unzip the batch into separate lists for inputs and labels
-        input_ids, labels = zip(*batch)
-
-        # Pad the input tensors
-        padded_inputs = torch.nn.utils.rnn.pad_sequence(
-            input_ids,
-            batch_first=True,
-            padding_value=pad_id
-        )
-
-        # Pad the labels tensors, using -100 to ignore loss on padded tokens
-        padded_labels = torch.nn.utils.rnn.pad_sequence(
-            labels,
-            batch_first=True,
-            padding_value=-100
-        )
-
-        # FINETUNE_PH2: Enforce max context length to prevent memory issues
-        max_context_length = self.config.get("context_length", 512)
-        if padded_inputs.size(1) > max_context_length:
-            padded_inputs = padded_inputs[:, :max_context_length]
-            padded_labels = padded_labels[:, :max_context_length]
-
-        # Final silent validation and fixing
-        max_input_token = padded_inputs.max().item()
-        min_input_token = padded_inputs.min().item()
-        
-        if min_input_token < 0 or max_input_token >= vocab_size:
-            # Emergency clamp ALL tokens
-            padded_inputs = torch.clamp(padded_inputs, 0, vocab_size - 1)
-            
-            # Also clamp labels (but preserve -100)
-            label_mask = padded_labels != -100
-            padded_labels[label_mask] = torch.clamp(padded_labels[label_mask], 0, vocab_size - 1)
-
-        # Final silent double-check
-        final_input_min, final_input_max = padded_inputs.min().item(), padded_inputs.max().item()
-        final_labels_valid = padded_labels[padded_labels != -100]
-        if len(final_labels_valid) > 0:
-            final_labels_min, final_labels_max = final_labels_valid.min().item(), final_labels_valid.max().item()
+        from torch.nn.utils.rnn import pad_sequence
+        cols = list(zip(*batch))
+        if len(cols) == 3:
+            inputs, labels, weights = cols
         else:
-            final_labels_min, final_labels_max = -100, -100
-            
-        # Absolute final silent fix
-        if final_input_max >= vocab_size or final_input_min < 0:
-            padded_inputs = torch.clamp(padded_inputs, 0, vocab_size - 1)
-            
-        if final_labels_max >= vocab_size or (final_labels_min < 0 and final_labels_min != -100):
-            label_mask = padded_labels != -100
-            padded_labels[label_mask] = torch.clamp(padded_labels[label_mask], 0, vocab_size - 1)
+            inputs, labels = cols
+            weights = [torch.tensor([1.0 if int(t) != -100 else 0.0 for t in lab], dtype=torch.float32) for lab in labels]
 
-        return padded_inputs, padded_labels
+        pad_id = 0
+        max_ctx = 512
+        try:
+            from ..config.opal_config import OPAL_MODEL_CONFIG as _OPAL_MODEL_CONFIG
+            pad_id = int(_OPAL_MODEL_CONFIG.get("pad_id", 0))
+            max_ctx = int(_OPAL_MODEL_CONFIG.get("context_length", 512))
+        except Exception:
+            pass
+
+        padded_inputs  = pad_sequence(inputs,  batch_first=True, padding_value=pad_id)
+        padded_labels  = pad_sequence(labels,  batch_first=True, padding_value=-100)
+        padded_weights = pad_sequence(weights, batch_first=True, padding_value=0.0)
+
+        if padded_inputs.size(1) > max_ctx:
+            padded_inputs  = padded_inputs[:, :max_ctx]
+            padded_labels  = padded_labels[:, :max_ctx]
+            padded_weights = padded_weights[:, :max_ctx]
+
+        return padded_inputs, padded_labels, padded_weights
 
     def collate_unused_finetune(self, batch):
         """Return a tuple (input_ids, labels) to match the model's forward(input, labels) signature."""
@@ -586,215 +530,7 @@ class Opal:
         return idx
 
 
-    # Ex: top_p=0.9 and optionally temperature > 0.7
-    def generate_V1(
-    self,
-    model,
-    idx: torch.Tensor,                  # [B, T] token ids (usually B=1 for sampling)
-    max_new_tokens: int,
-    context_size: int,                  # model's max context length (e.g., pos_emb size)
-    top_k: int | None = None,
-    top_p: float | None = None,         # nucleus sampling (0<top_p<=1)
-    temperature: float = 1.0,           # 0 => greedy
-    eos_id: int | None = None,
-    repetition_penalty: float = 1.0,    # >1.0 penalizes repeats
-    ) -> torch.Tensor:
-        """
-        Generate tokens autoregressively with top-k / top-p (nucleus) filtering,
-        temperature scaling, and an improved repetition penalty that weighs recent occurrences.
-
-        This function is hardened against advanced-indexing mistakes that can
-        cause CUDA device-side asserts (IndexKernel). In particular, top-p filtering
-        uses scatter() / masked_fill() per-batch instead of 2D tensor fancy indexing.
-        """
-        model.eval()
-        device = idx.device
-
-        B = idx.size(0)
-        assert B >= 1, "idx must have batch dimension >=1 (e.g., [1, T])"
-
-        with torch.no_grad():
-            for _ in range(max_new_tokens):
-
-                # Keep the last `context_size` tokens to stay within the positional embedding range
-                idx_cond = idx[:, -context_size:]
-
-                # Forward pass
-                model_output = model(idx_cond)
-                # ✅ Take only last token logits
-                logits = model_output["logits"] if isinstance(model_output, dict) else model_output
-                logits = logits[:, -1, :]  # [B, V] — logits for the next-token position only
-                V = logits.size(-1)
-
-                # ---------------------------------------------------------------------
-                # Improved repetition penalty - penalize recently repeated tokens more heavily
-                # We apply a stronger penalty for tokens that appear multiple times
-                # in the *recent* context (last 20 tokens), with extra weight for
-                # very recent (last 3) positions.
-                # ---------------------------------------------------------------------
-                if repetition_penalty and repetition_penalty > 1.0:
-                    # Consider only the last 20 tokens per sequence
-                    window = min(20, idx_cond.size(1))
-                    recent = idx_cond[:, -window:]  # [B, W]
-                    # Clamp recent tokens to valid vocab just in case (prevents indexing surprises)
-                    recent = recent.clamp_(0, V - 1)
-
-                    # For B==1 (typical sampling) we can do a fast path; otherwise do a loop
-                    for b in range(B):
-                        recent_b = recent[b]  # [W]
-                        # Count occurrences and remember positions
-                        # Build a map: token_id -> positions (0..W-1)
-                        # (Python dict is fine at tiny W; this keeps code clear.)
-                        token_positions = {}
-                        # Enumerate from left to right; positions grow with recency
-                        for i_pos, tok in enumerate(recent_b.tolist()):
-                            token_positions.setdefault(tok, []).append(i_pos)
-
-                        # Apply penalties
-                        # We only touch tokens that appear more than once to avoid over-penalizing
-                        # legitimate single occurrences.
-                        for tok, positions in token_positions.items():
-                            if len(positions) <= 1:
-                                continue
-                            # Base frequency penalty scales with count
-                            freq_pen = repetition_penalty ** len(positions)
-
-                            # Extra penalty for *very* recent repetition (appeared in last 3 tokens)
-                            most_recent_pos = positions[-1]
-                            if most_recent_pos >= window - 3:
-                                freq_pen *= 1.5
-
-                            # Apply to the corresponding logit (batched-safe)
-                            # Guard for safety in case tok somehow falls outside [0, V-1]
-                            if 0 <= tok < V:
-                                # If logit is positive we divide; if negative we multiply (GPT-2 style)
-                                # to reduce the probability of repeated tokens while preserving sign.
-                                if logits[b, tok] > 0:
-                                    logits[b, tok] = logits[b, tok] / freq_pen
-                                else:
-                                    logits[b, tok] = logits[b, tok] * freq_pen
-
-                # ---------------------------------------------------------------------
-                #  Apply temperature scaling (makes probabilities sharper or smoother)
-                # ---------------------------------------------------------------------
-                if temperature is not None and temperature > 0.0:
-                    logits = logits / temperature
-                    # (If temperature == 0.0 we will fall back to greedy after filtering.)
-                # else: keep original logits for greedy
-
-                # ---------------------------------------------------------------------
-                # Top-k filtering (keep only the k highest logit tokens per row)
-                # ---------------------------------------------------------------------
-                if top_k is not None and top_k > 0 and top_k < V:
-                    # min value per row to keep
-                    topk_vals, _ = logits.topk(top_k, dim=-1)                 # [B, k]
-                    kth = topk_vals[..., -1, None]                            # [B, 1]
-                    # Mask out everything below the kth value
-                    logits = torch.where(logits < kth, torch.full_like(logits, float('-inf')), logits)
-
-                # ---------------------------------------------------------------------
-                # Top-p (nucleus) filtering (keep the smallest set whose cumulative prob >= p)
-                # IMPORTANT: do all masking per-batch via scatter()/masked_fill() to avoid
-                #            out-of-bounds advanced indexing on [B, V] tensors.
-                # ---------------------------------------------------------------------
-                if top_p is not None and 0.0 < top_p < 1.0:
-                    # Work on softmax probabilities in *sorted* order
-                    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)  # [B, V]
-                    probs = torch.softmax(sorted_logits, dim=-1)                                  # [B, V]
-                    cumulative_probs = probs.cumsum(dim=-1)                                       # [B, V]
-
-                    # Tokens to remove: those after the nucleus
-                    sorted_indices_to_remove = cumulative_probs > top_p                           # [B, V]
-                    # Shift to always keep at least the first (highest-prob) token
-                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                    sorted_indices_to_remove[..., 0] = False
-
-                    # ✅ Scatter the "remove" mask back to original indices
-                    indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)                # [B, V]
-                    indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
-
-                    # ✅ Mask them out in-place (batched safe)
-                    logits = logits.masked_fill(indices_to_remove, float('-inf'))
-
-                # ---------------------------------------------------------------------
-                # Sample or greedy-pick the next token
-                # ---------------------------------------------------------------------
-                if temperature is not None and temperature <= 0.0:
-                    # Greedy (argmax) if temperature==0
-                    next_token = torch.argmax(logits, dim=-1, keepdim=True)  # [B, 1]
-                else:
-                    # Convert to proper probabilities after all filtering
-                    probs = torch.softmax(logits, dim=-1)                    # [B, V]
-
-                    # Safety: if a row becomes all -inf (rare with top-k/p), fallback to argmax
-                    # (softmax(-inf) -> NaN); detect and recover.
-                    nan_rows = torch.isnan(probs).any(dim=-1)                # [B]
-                    if nan_rows.any():
-                        fallback = torch.argmax(logits[nan_rows], dim=-1, keepdim=True)
-                        # initialize next_token with multinomial then patch fallback rows
-                        next_token = torch.multinomial(
-                            torch.softmax(torch.where(nan_rows[:, None], torch.zeros_like(logits), logits), dim=-1),
-                            num_samples=1
-                        )
-                        next_token[nan_rows] = fallback
-                    else:
-                        next_token = torch.multinomial(probs, num_samples=1)  # [B, 1]
-
-                # Append sampled token
-                idx = torch.cat([idx, next_token], dim=1)  # [B, T+1]
-
-                # Early stop if EOS reached for all sequences
-                if eos_id is not None:
-                    if torch.all(next_token.squeeze(-1) == eos_id):
-                        break
-
-        model.train()  # restore training mode for caller, if needed
-        return idx
-
-
-    def generate_v0(self, model, idx, max_new_tokens, context_size, temperature=0.0, top_k=None, eos_id=None):
-
-         
-        # The following loop generates one token at a time, for a total
-        # of max_new_tokens iterations. At each iteration, the model
-        # is fed the current sequence (idx) and generates a new token.
-        # The new token is then appended to the current sequence, and
-        # the loop continues until max_new_tokens tokens have been
-        # generated.
-        for _ in range(max_new_tokens):
-            idx_cond = idx[:, -context_size:]
-            with torch.no_grad():
-                model_output = model(idx_cond)
-            logits = model_output["logits"][0, -1, :]
-
-            #  Filter logits with top_k sampling
-            if top_k is not None:
-                # Keep only top_k values
-                top_logits, _ = torch.topk(logits, top_k)
-                min_val = top_logits[:, -1]
-                logits = torch.where(logits < min_val, torch.tensor(float('-inf')).to(logits.device), logits)
-
-            #  Apply temperature scaling
-            if temperature > 0.0:
-                logits = logits / temperature
-
-                # Apply softmax to get probabilities
-                probs = torch.softmax(logits, dim=-1)  # (batch_size, context_len)
-
-                # Sample from the distribution
-                idx_next = torch.multinomial(probs, num_samples=1)  # (batch_size, 1)
-
-            # Otherwise same as before: get idx of the vocab entry with the highest logits value
-            else:
-                idx_next = torch.argmax(logits, dim=-1, keepdim=True)  # (batch_size, 1)
-
-            if idx_next == eos_id:  # Stop generating early if end-of-sequence token is encountered and eos_id is specified
-                break
-
-            # Same as before: append sampled index to the running sequence
-            idx = torch.cat((idx, idx_next), dim=1)  # (batch_size, num_tokens+1)
-
-        return idx
+    
 
     def train_model_simple(self, model, train_loader, val_loader, 
                         optimizer, scheduler, device, num_epochs,
@@ -834,7 +570,7 @@ class Opal:
         if self.is_finetune:
             # Fine-tuning: lighter warmup (2% of total steps or configured warmup_steps)
             #warmup_steps = min(self.config.get("warmup_steps", int(total_steps * 0.02)), int(total_steps * 0.1))
-            warmup_steps = 0
+            warmup_steps =  min(self.config.get("warmup_steps", 100), 100)
         else:
             # Pretraining: standard warmup (5% of total steps)
             warmup_steps = int(total_steps * 0.05)
@@ -888,8 +624,8 @@ class Opal:
 
             # Training loop with gradient accumulation
             accumulated_loss = 0.0
-            for batch_idx, (input_ids, targets) in enumerate(pbar):
-                # Move input and target tensors to the specified device
+            for batch_idx, (input_ids, targets, weights) in enumerate(pbar):
+                # Move input and targ`et tensors to the specified device
                 input_ids = input_ids.to(device, non_blocking=True)
                 targets = targets.to(device, non_blocking=True)
 
@@ -934,6 +670,7 @@ class Opal:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                         scaler.step(optimizer)
                         scaler.update()
+            
                     else:
                         # Calculate gradient norm for logging
                         for p in model.parameters():
@@ -1425,7 +1162,7 @@ class Opal:
             raise ValueError(f"Shape mismatch. Left: {left.shape}, Right: {right.shape}")
         return torch.nn.Parameter(torch.tensor(right))
     
-    def calc_loss_batch(self, input_batch, target_batch, model, device):
+    def calc_loss_batch(self, input_batch, target_batch, weights, model, device):
         """
         Compute the loss for a single batch during training.
 
@@ -1445,6 +1182,7 @@ class Opal:
         # Move inputs to the correct device
         input_batch = input_batch.to(device)
         target_batch = target_batch.to(device)
+        weights = weights.to(device) if weights is not None else None
 
         # 1️⃣ Forward pass: Let the model compute logits and loss
         # If labels are provided, the model itself computes loss (with ignore_index=-100)
@@ -1469,14 +1207,24 @@ class Opal:
                 # Check if vocab dimensions match
                 expected_vocab = self.config.get('vocab_size', 12000)
                 actual_vocab = logits.size(-1)
+                B, T, V = logits.size()
+                logits_flat = logits.reshape(B*T, V)
+                labels_flat = target_batch.reshape(B*T)
+                weights_flat = weights.reshape(B*T)
+
                 if actual_vocab != expected_vocab:
                     print(f"🚨 CRITICAL MISMATCH: Logits vocab={actual_vocab} != expected={expected_vocab}")
                     print(f"   This indicates model was trained with different vocab size!")
                     print(f"   🛡️  EMERGENCY: Cannot fix vocab size mismatch at runtime")
                     raise ValueError(f"Model vocab size mismatch: {actual_vocab} vs {expected_vocab}")
                 
-                loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
-                loss = loss_fct(logits.view(-1, logits.size(-1)), target_batch.view(-1))
+                #loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+                per_tok = F.cross_entropy(logits_flat, labels_flat, reduction='none', ignore_index=-100)
+                valid = (labels_flat != -100).float()
+                w = torch.where(valid > 0, weights_flat, torch.zeros_like(weights_flat))
+                denom = torch.clamp(w.sum(), min=1.0)
+                loss = (per_tok * w).sum() / denom
+                #loss = loss_fct(logits.view(-1, logits.size(-1)), target_batch.view(-1))
         else:
             # If model returns only logits (legacy behavior)
             logits = model_output

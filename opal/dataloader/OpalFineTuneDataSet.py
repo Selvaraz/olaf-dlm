@@ -1,290 +1,224 @@
 import torch
 from torch.utils.data import Dataset
 import json
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from ..config.opal_config import TRAINING_CONFIG, OPAL_MODEL_CONFIG
 
 class OpalFinetuneDataset(Dataset):
+    """
+    Builds training samples from JSONL-style items { "prompt": str, "response": {...} } without
+    changing your dataset format. We only wrap the example in textual tags so the model learns
+    to map <USER> prompt -> <ASSISTANT> JSON response.
+
+    Returns (input_ids, labels, weights):
+      - input_ids: token IDs (with BOS/EOS if configured)
+      - labels: next-token targets, masked (-100) over the user/prompt region
+      - weights: per-token float weights; 1.0 for assistant tokens, boosted (e.g., x3)
+                 inside any "commands": [...] JSON arrays, 0.0 for user/pad tokens
+    """
     def __init__(self, data: List[Dict], tokenizer):
         """
         Args:
-            data: List of dicts with keys {"prompt", "response"}
-            tokenizer: SentencePieceProcessor instance
+            data: list of dicts, each like: {"prompt": str, "response": {...}}
+            tokenizer: SentencePieceProcessor (with bos_id/eos_id/pad_id configured)
         """
+        super().__init__()
         self.data = data
         self.tokenizer = tokenizer
-        self.max_length = OPAL_MODEL_CONFIG["context_length"]
-        self.device = TRAINING_CONFIG["device"]
 
-        self.samples = self._prepare_data()
-        
-        # Check for potential tokenization issues
-        self._validate_tokenization()
+        self.max_length: int = int(OPAL_MODEL_CONFIG.get("context_length", 512))
 
-    def _validate_tokenization(self):
-        """Check for common tokenization issues that could cause repetitive generation."""
-        if not self.samples:
-            return
-            
-        unk_id = self.tokenizer.unk_id() if hasattr(self.tokenizer, 'unk_id') else -1
-        total_tokens = 0
-        unk_tokens = 0
-        
-        for sample in self.samples[:min(100, len(self.samples))]:  # Check first 100 samples
-            input_ids = sample["input_ids"]
-            total_tokens += len(input_ids)
-            if unk_id >= 0:
-                unk_tokens += (input_ids == unk_id).sum().item()
-        
-        if total_tokens > 0:
-            unk_percentage = (unk_tokens / total_tokens) * 100
-            print(f"   → Unknown token rate: {unk_percentage:.2f}% ({unk_tokens}/{total_tokens})")
-            
-            if unk_percentage > 5.0:
-                print(f"   ⚠️ WARNING: High unknown token rate! This could cause repetitive generation.")
-                print(f"      Consider using a tokenizer trained on similar data.")
-            elif unk_percentage > 10.0:
-                print(f"   🚨 CRITICAL: Very high unknown token rate! This will likely cause poor generation quality.")
+        # Tag tokens (keep consistent train <-> infer)
+        self.user_tag_open = "<QUESTION>"
+        self.user_tag_close = "</QUESTION>"
+        self.asst_tag = "<ASSISTANT>"
 
-    def _json_to_natural_format(self, json_obj):
+        # Special IDs (prefer tokenizer methods if present)
+        self.pad_id = self._safe_token_id("pad_id", default=OPAL_MODEL_CONFIG.get("pad_id", 0))
+        self.bos_id = self._safe_token_id("bos_id", default=OPAL_MODEL_CONFIG.get("bos_id", 1))
+        self.eos_id = self._safe_token_id("eos_id", default=OPAL_MODEL_CONFIG.get("eos_id", 2))
+
+        # How strongly we upweight command tokens
+        self.COMMANDS_WEIGHT = float(TRAINING_CONFIG.get("commands_weight", 3.0))
+
+        self.samples = self._build_samples()
+
+    # ------------------------------ utils ------------------------------
+
+    def _safe_token_id(self, name: str, default: int) -> int:
+        """Get special token id from tokenizer if exposed as a callable; otherwise fallback."""
+        tid = default
+        try:
+            maybe = getattr(self.tokenizer, name, None)
+            tid = maybe() if callable(maybe) else default
+            if tid is None:
+                tid = default
+        except Exception:
+            tid = default
+        return int(tid)
+
+    def _wrap_texts(self, prompt: str, response_obj: Dict) -> Tuple[str, str, str]:
         """
-        Convert JSON response to a more natural language format that's better for fine-tuning.
-        This reduces repetitive JSON syntax and makes responses more human-readable.
+        Create the three segments:
+          user_text: "<QUESTION> {prompt} </QUESTION>\n"
+          asst_head: "<ASSISTANT> "
+          resp_text: compact JSON string: '{"response": {...}}'
         """
-        if isinstance(json_obj, dict):
-            # Handle responses with steps at top level (like your sample)
-            if "steps" in json_obj:
-                return self._format_steps_response(json_obj)
-            # Handle orbit.troubleshoot responses
-            elif "action" in json_obj and json_obj["action"] == "orbit.troubleshoot":
-                return self._format_troubleshoot_response(json_obj)
+        user_text = f"{self.user_tag_open} {prompt} {self.user_tag_close}\n"
+        asst_head = f"{self.asst_tag} "
+        # Compact JSON reduces token bloat, keep deterministic separators
+        resp_text = json.dumps({"response": response_obj}, separators=(",", ":"))
+        return user_text, asst_head, resp_text
+
+    def _tokenize(self, text: str) -> List[int]:
+        """Tokenize a string to IDs; we manage BOS/EOS ourselves outside of this method."""
+        return self.tokenizer.encode(text, out_type=int)
+
+    # ----------- commands span detection (character spans in resp_text) -----------
+
+    def _find_commands_char_spans(self, resp_text: str) -> List[Tuple[int, int]]:
+        """
+        Return a list of (start_char, end_char) covering each '"commands":[ ... ]' array
+        (including the key). Uses bracket matching and string-state to be robust to quotes.
+        """
+        spans: List[Tuple[int, int]] = []
+        key = '"commands":['
+        i = 0
+        n = len(resp_text)
+        while True:
+            j = resp_text.find(key, i)
+            if j < 0:
+                break
+            arr_start = j + len(key)  # first char inside array
+            # Scan forward to matching closing bracket of this array
+            depth = 1
+            k = arr_start
+            in_str = False
+            esc = False
+            while k < n and depth > 0:
+                ch = resp_text[k]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == '\\\\':
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                else:
+                    if ch == '"':
+                        in_str = True
+                    elif ch == '[':
+                        depth += 1
+                    elif ch == ']':
+                        depth -= 1
+                k += 1
+            spans.append((j, k))  # include key through the closing bracket
+            i = k
+        return spans
+
+    def _charpos_to_token_index_lookup(self, text: str) -> List[int]:
+        """
+        Build a list where offset[i] = number of characters in decode(ids[:i]).
+        We'll use it to map a character position to a token index by binary search.
+        NOTE: This is an approximate mapping suitable for weighting; exact alignment
+        would need tokenizer-provided offset mapping.
+        """
+        ids = self._tokenize(text)
+        offsets = [0]
+        accum = ""
+        # To avoid quadratic behavior on large texts, we incrementally decode by appending
+        # each next token to a running prefix using tokenizer.decode on slices.
+        # SentencePiece decode is deterministic and stable for this purpose.
+        for t in ids:
+            accum = self.tokenizer.decode(self.tokenizer.encode(accum, out_type=int) + [t])
+            offsets.append(len(accum))
+        return ids, offsets
+
+    @staticmethod
+    def _char_to_token_index(offsets: List[int], char_pos: int) -> int:
+        """Find smallest token index i where decoded chars >= char_pos."""
+        lo, hi = 0, len(offsets) - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if offsets[mid] < char_pos:
+                lo = mid + 1
             else:
-                # Generic JSON to natural language conversion
-                return self._generic_json_to_text(json_obj)
-        else:
-            return str(json_obj)
-    
-    def _format_steps_response(self, response):
-        """Format responses with steps at top level (like your sample)."""
-        output = []
-        
-        # Add action if present
-        if "action" in response:
-            output.append(f"Action: {response.get('action')}")
-        
-        # Process steps directly from top level
-        steps = response.get("steps", [])
-        
-        if steps:
-            output.append("Execution Steps:")
-            
-            for i, step in enumerate(steps, 1):
-                step_type = step.get("step_type", "unknown")
-                descriptions = step.get("description", [])
-                commands = step.get("commands", [])
-                
-                # Format step header
-                if step_type == "step_explain":
-                    output.append(f"Step {i} - Explanation:")
-                elif step_type == "step_conf":
-                    output.append(f"Step {i} - Configuration:")
-                elif step_type == "step_exec":
-                    output.append(f"Step {i} - Execution:")
-                else:
-                    output.append(f"Step {i} - {step_type}:")
-                
-                # Add descriptions
-                if descriptions:
-                    for desc in descriptions:
-                        output.append(f"  - {desc}")
-                
-                # Add commands
-                if commands:
-                    output.append("  Commands:")
-                    for cmd in commands:
-                        output.append(f"    {cmd}")
-        
-        result = "\n".join(output)
-        
-        # Limit length to prevent overly long responses
-        if len(result) > 600:
-            result = result[:600] + "\n  [Response truncated for training efficiency]"
-        
-        return result
-    
-    def _format_troubleshoot_response(self, response):
-        """Format orbit.troubleshoot responses in a natural way."""
-        output = []
-        
-        # Start with action
-        output.append(f"Action: {response.get('action', 'unknown')}")
-        
-        # Process execution steps
-        execution = response.get("execution", {})
-        steps = execution.get("steps", [])
-        
-        if steps:
-            output.append("Execution Steps:")
-            
-            for i, step in enumerate(steps, 1):
-                step_type = step.get("step_type", "unknown")
-                descriptions = step.get("description", [])
-                commands = step.get("commands", [])
-                
-                # Format step header
-                if step_type == "step_explain":
-                    output.append(f"Step {i} - Explanation:")
-                elif step_type == "step_conf":
-                    output.append(f"Step {i} - Configuration:")
-                elif step_type == "step_exec":
-                    output.append(f"Step {i} - Execution:")
-                else:
-                    output.append(f"Step {i} - {step_type}:")
-                
-                # Add descriptions
-                if descriptions:
-                    for desc in descriptions:
-                        output.append(f"  - {desc}")
-                
-                # Add commands
-                if commands:
-                    output.append("  Commands:")
-                    for cmd in commands:
-                        output.append(f"    {cmd}")
-        
-        result = "\n".join(output)
-        
-        # Limit length to prevent overly long responses
-        if len(result) > 600:
-            result = result[:600] + "\n  [Response truncated for training efficiency]"
-        
-        return result
-    
-    def _generic_json_to_text(self, obj, indent=0):
-        """Convert generic JSON to more natural text format."""
-        lines = []
-        prefix = "  " * indent
-        
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                if isinstance(value, (dict, list)) and value:
-                    lines.append(f"{prefix}{key}:")
-                    lines.append(self._generic_json_to_text(value, indent + 1))
-                else:
-                    lines.append(f"{prefix}{key}: {value}")
-        elif isinstance(obj, list):
-            for i, item in enumerate(obj):
-                if isinstance(item, (dict, list)):
-                    lines.append(f"{prefix}Item {i+1}:")
-                    lines.append(self._generic_json_to_text(item, indent + 1))
-                else:
-                    lines.append(f"{prefix}- {item}")
-        else:
-            lines.append(f"{prefix}{obj}")
-        
-        return "\n".join(lines)
+                hi = mid
+        return lo
 
-    def _prepare_data(self):
+    # ------------------------------ core build ------------------------------
+
+    def _build_samples(self):
         samples = []
-        for item in self.data:
-            if "prompt" not in item or "response" not in item:
-                raise ValueError(f"Invalid JSONL sample format: {item}")
+        for ex in self.data:
+            prompt = ex.get("prompt", "")
+            response_obj = ex.get("response", {})
 
-            prompt = item["prompt"].strip()
-            # Always convert response to natural language format for better fine-tuning
-            if isinstance(item["response"], str):
-                try:
-                    # Try to parse as JSON first in case it's a JSON string
-                    json_response = json.loads(item["response"])
-                    response_text = self._json_to_natural_format(json_response)
-                except (json.JSONDecodeError, ValueError):
-                    # If not valid JSON, use as-is
-                    response_text = item["response"].strip()
-            else:
-                # Convert JSON object to natural language format
-                response_text = self._json_to_natural_format(item["response"])
+            user_text, asst_head, resp_text = self._wrap_texts(prompt, response_obj)
 
-            # Validate minimum length
-            if len(prompt) < 5:
-                print(f"⚠ Skipping too short prompt: {prompt[:50]}...")
-                continue
+            # Tokenize parts separately
+            user_ids = self._tokenize(user_text)
+            asst_head_ids = self._tokenize(asst_head)
+            resp_ids = self._tokenize(resp_text)
 
-            # Since <BOS> and <EOS> are not in tokenizer vocabulary, use the built-in special tokens
-            bos_token = self.tokenizer.bos_id() if hasattr(self.tokenizer, 'bos_id') and self.tokenizer.bos_id() >= 0 else None
-            eos_token = self.tokenizer.eos_id() if hasattr(self.tokenizer, 'eos_id') and self.tokenizer.eos_id() >= 0 else None
-            
-            # Add clear separators to help the model distinguish prompt from response
-            # Use tokens that are likely in the vocabulary
-            prompt_marker = "<USER>"
-            response_marker = "<ASSISTANT>"
-            
-            # Build the full sequence with clear structure
-            full_text = f"{prompt_marker} {prompt} {response_marker} {response_text}"
-            
-            # Encode the full text
-            input_ids = self.tokenizer.encode(full_text, out_type=int)
-            
-            # Add BOS token at the beginning if available
-            if bos_token is not None:
-                input_ids = [bos_token] + input_ids
-            
-            # Add EOS token at the end if available
-            if eos_token is not None:
-                input_ids = input_ids + [eos_token]
-            
-            # Encode the prompt part with marker to determine masking boundary more accurately
-            prompt_with_marker = f"{prompt_marker} {prompt} {response_marker}"
-            prompt_ids = self.tokenizer.encode(prompt_with_marker, out_type=int)
-            if bos_token is not None:
-                prompt_ids = [bos_token] + prompt_ids
-                
-            # Truncate if too long
+            # Compose with BOS/EOS
+            input_ids: List[int] = []
+            if self.bos_id >= 0:
+                input_ids.append(self.bos_id)
+            input_ids.extend(user_ids)
+            input_ids.extend(asst_head_ids)
+            assistant_start_idx = len(input_ids)  # labels start here
+            input_ids.extend(resp_ids)
+            if self.eos_id >= 0:
+                input_ids.append(self.eos_id)
+
+            # Truncate (prefer trimming user side; keep assistant content)
             if len(input_ids) > self.max_length:
-                input_ids = input_ids[:self.max_length]
-                
-            prompt_len = min(len(prompt_ids), len(input_ids))
+                overflow = len(input_ids) - self.max_length
+                # don't cut BOS
+                cut_from = 1 if (self.bos_id >= 0) else 0
+                cut_to = min(cut_from + overflow, assistant_start_idx)  # never trim into assistant
+                input_ids = input_ids[:cut_from] + input_ids[cut_to:]
+                assistant_start_idx = max(assistant_start_idx - (cut_to - cut_from), 0)
+                input_ids = input_ids[: self.max_length]
 
-            # Apply the masks for the prompt tokens, so our DLM does not 
-            # Learn about the prompt :-D
-            labels = [-100] * prompt_len + input_ids[prompt_len:]
-            
-            # Ensure labels are also truncated to match input_ids length
-            if len(labels) > self.max_length:
-                labels = labels[:self.max_length]
+            # Labels: mask user region
+            labels = [-100] * len(input_ids)
+            for i in range(assistant_start_idx, len(input_ids)):
+                labels[i] = input_ids[i]
 
-            # Debug: Print first few samples to verify format
-            if len(samples) < 3:  # Only for first few samples
-                print(f"   → Sample {len(samples) + 1} debug:")
-                print(f"     Prompt: {prompt[:100]}...")
-                print(f"     Response length: {len(response_text)} chars")
-                print(f"     Full text: {full_text[:150]}...")
-                print(f"     Input IDs length: {len(input_ids)}, Prompt boundary: {prompt_len}")
-                
-                # Check if response_text is properly structured JSON
-                if isinstance(item["response"], dict):
-                    print(f"     JSON keys: {list(item['response'].keys())}")
+            # Weights: default 0.0 for user region, 1.0 for assistant region
+            weights = [0.0] * assistant_start_idx + [1.0] * (len(input_ids) - assistant_start_idx)
+
+            # Boost weights for "commands" spans
+            try:
+                # Build mapping from char->token index for resp_text only
+                resp_only_ids, char_offsets = self._charpos_to_token_index_lookup(resp_text)
+                # Translate resp-only token indices into full input_ids indices
+                for (cs, ce) in self._find_commands_char_spans(resp_text):
+                    t0 = self._char_to_token_index(char_offsets, cs)
+                    t1 = self._char_to_token_index(char_offsets, ce)
+                    start = assistant_start_idx + t0
+                    end = assistant_start_idx + t1
+                    for k in range(max(start, assistant_start_idx), min(end, len(input_ids))):
+                        if labels[k] != -100:
+                            weights[k] = float(self.COMMANDS_WEIGHT)
+            except Exception:
+                # If anything fails, keep baseline weights (still helpful)
+                pass
 
             samples.append({
                 "input_ids": torch.tensor(input_ids, dtype=torch.long),
-                "labels": torch.tensor(labels, dtype=torch.long)
+                "labels": torch.tensor(labels, dtype=torch.long),
+                "weights": torch.tensor(weights, dtype=torch.float32),
             })
 
-        print(f"📊 Fine-tune dataset prepared: {len(samples)} valid samples")
-        if len(samples) > 0:
-            avg_input_len = sum(len(s["input_ids"]) for s in samples) / len(samples)
-            avg_label_len = sum((s["labels"] != -100).sum().item() for s in samples) / len(samples)
-            print(f"   → Avg input length: {avg_input_len:.1f}, Avg response length: {avg_label_len:.1f}")
-            
-            # Debug: Check if BOS/EOS tokens are properly used
+        if samples:
             sample_input = samples[0]["input_ids"]
             sample_labels = samples[0]["labels"]
-            bos_token = self.tokenizer.bos_id() if hasattr(self.tokenizer, 'bos_id') and self.tokenizer.bos_id() >= 0 else None
-            eos_token = self.tokenizer.eos_id() if hasattr(self.tokenizer, 'eos_id') and self.tokenizer.eos_id() >= 0 else None
-            
-            print(f"   → BOS token ID: {bos_token}, EOS token ID: {eos_token}")
-            print(f"   → Sample input first 5 tokens: {sample_input[:5].tolist()}")
-            print(f"   → Sample input last 5 tokens: {sample_input[-5:].tolist()}")
-            print(f"   → Sample labels (non-masked): {(sample_labels != -100).sum().item()}/{len(sample_labels)}")
+            print(f"[OpalFinetuneDataset] Built {len(samples)} samples; max_length={self.max_length}")
+            print(f"   → BOS={self.bos_id}, EOS={self.eos_id}, PAD={self.pad_id}")
+            print(f"   → Sample input len={len(sample_input)}, labels(non-masked)={(sample_labels != -100).sum().item()}")
 
         return samples
 
@@ -292,4 +226,5 @@ class OpalFinetuneDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        return self.samples[idx]["input_ids"], self.samples[idx]["labels"]
+        s = self.samples[idx]
+        return s["input_ids"], s["labels"], s["weights"]
