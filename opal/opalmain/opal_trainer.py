@@ -413,8 +413,181 @@ class Opal:
             print(f"✅ Pre-tokenized dataset saved to {pretokenized_path}")
             return torch.load(pretokenized_path)
 
-    # Ex: top_p=0.9 and optionally temperature > 0.7
+    # ----
+
     def generate(
+    self,
+    model,
+    idx: torch.Tensor,                  # [B, T]
+    max_new_tokens: int,
+    context_size: int,                  # model’s max context length
+    top_k: int | None = None,
+    top_p: float | None = None,         # (0,1]
+    temperature: float = 1.0,           # 0 => greedy
+    eos_id: int | None = None,
+    repetition_penalty: float = 1.0,    # multiplicative (GPT-2 style)
+    # 🔽 Anti-repetition knobs (new)
+    no_repeat_ngram_size: int | None = 3,     # e.g., 3 to block tri-gram repeats
+    presence_penalty: float = 0.0,            # additive: -beta if token seen in window
+    frequency_penalty: float = 0.0,           # additive: -alpha * count in window
+    penalty_window: int = 64,                  # window for presence/frequency penalties
+    max_consecutive_repeats: int = 3,         # if the last token already occurs N times tailing, ban it
+    ) -> torch.Tensor:
+        """
+        Decoding with top-k / top-p, temperature, improved repetition penalty,
+        plus no-repeat n-gram, presence/frequency penalties, and max-consecutive guard.
+        Uses scatter()/masked_fill() for top-p to avoid CUDA indexing asserts.
+        """
+        model.eval()
+        device = idx.device
+        B = idx.size(0)
+        assert B >= 1
+
+        def _apply_no_repeat_ngram_block(logits_row: torch.Tensor, seq_row: torch.Tensor, n: int):
+            """In-place: set logits of tokens that would create a repeated n-gram to -inf (B=1 fast path; loops are fine)."""
+            if n is None or n <= 1 or seq_row.numel() < n - 1:
+                return
+            # Build map of (n-1)-gram -> set(next_token) from history
+            history = seq_row.tolist()
+            prefix_to_next = {}
+            for i in range(len(history) - n + 1):
+                prefix = tuple(history[i:i + n - 1])
+                nxt = history[i + n - 1]
+                s = prefix_to_next.get(prefix)
+                if s is None:
+                    s = set()
+                    prefix_to_next[prefix] = s
+                s.add(nxt)
+            # Current prefix (last n-1)
+            cur_prefix = tuple(history[-(n - 1):]) if n - 1 > 0 else tuple()
+            if cur_prefix in prefix_to_next:
+                bad_next = prefix_to_next[cur_prefix]
+                for tok in bad_next:
+                    if 0 <= tok < logits_row.numel():
+                        logits_row[tok] = float("-inf")
+
+        def _apply_presence_frequency_penalties(logits_row: torch.Tensor, recent_row: torch.Tensor):
+            """Additive penalties (OpenAI-style): subtract alpha*count + beta*1{seen}."""
+            if (presence_penalty <= 0.0) and (frequency_penalty <= 0.0):
+                return
+            # Count in a small recent window
+            vals, counts = recent_row.unique(return_counts=True)
+            # Only penalize valid ids
+            V = logits_row.numel()
+            m = (vals >= 0) & (vals < V)
+            if m.any():
+                vals = vals[m]
+                counts = counts[m].to(logits_row.dtype)
+                # logits[tok] -= frequency_penalty * count + presence_penalty * 1
+                # Do it in vectorized chunks
+                for tok, c in zip(vals.tolist(), counts.tolist()):
+                    logits_row[tok] -= (frequency_penalty * c + presence_penalty * 1.0)
+
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                # Trim to model context
+                idx_cond = idx[:, -context_size:]
+
+                model_output = model(idx_cond)
+                logits = model_output["logits"] if isinstance(model_output, dict) else model_output
+                logits = logits[:, -1, :]  # [B, V] next-token logits
+                V = logits.size(-1)
+
+                # === Improved repetition penalty (multiplicative, recent window 20)
+                if repetition_penalty and repetition_penalty > 1.0:
+                    window = min(20, idx_cond.size(1))
+                    recent = idx_cond[:, -window:].clamp_(0, V - 1)
+                    for b in range(B):
+                        recent_b = recent[b]
+                        token_positions = {}
+                        for i_pos, tok in enumerate(recent_b.tolist()):
+                            token_positions.setdefault(tok, []).append(i_pos)
+                        for tok, positions in token_positions.items():
+                            if len(positions) <= 1 or tok < 0 or tok >= V:
+                                continue
+                            freq_pen = repetition_penalty ** len(positions)
+                            if positions[-1] >= window - 3:  # last-3 boost
+                                freq_pen *= 1.5
+                            if logits[b, tok] > 0:
+                                logits[b, tok] = logits[b, tok] / freq_pen
+                            else:
+                                logits[b, tok] = logits[b, tok] * freq_pen
+
+                # === Additive presence/frequency penalties on a larger window
+                if (presence_penalty > 0.0) or (frequency_penalty > 0.0):
+                    win = min(penalty_window, idx_cond.size(1))
+                    recent_big = idx_cond[:, -win:].clamp_(0, V - 1)
+                    for b in range(B):
+                        _apply_presence_frequency_penalties(logits[b], recent_big[b])
+
+                # === Max consecutive token guard
+                if max_consecutive_repeats and max_consecutive_repeats > 0:
+                    for b in range(B):
+                        last = int(idx[b, -1].item())
+                        # count tail run length of 'last'
+                        run = 1
+                        j = idx.size(1) - 2
+                        while j >= 0 and int(idx[b, j].item()) == last:
+                            run += 1
+                            if run >= max_consecutive_repeats:
+                                # Ban the last token to force diversity
+                                if 0 <= last < V:
+                                    logits[b, last] = float("-inf")
+                                break
+                            j -= 1
+
+                # === Temperature
+                if temperature is not None and temperature > 0.0:
+                    logits = logits / temperature
+
+                # === Top-k
+                if top_k is not None and 0 < top_k < V:
+                    topk_vals, _ = logits.topk(top_k, dim=-1)
+                    kth = topk_vals[..., -1, None]
+                    logits = torch.where(logits < kth, torch.full_like(logits, float('-inf')), logits)
+
+                # === Top-p (nucleus) with scatter-back (batched-safe)
+                if top_p is not None and 0.0 < top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)  # [B,V]
+                    probs = torch.softmax(sorted_logits, dim=-1)
+                    cumulative_probs = probs.cumsum(dim=-1)
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = False
+                    indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)
+                    indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
+                    logits = logits.masked_fill(indices_to_remove, float('-inf'))
+
+                # === No-repeat n-gram blocking (applied *after* k/p filtering)
+                if no_repeat_ngram_size and no_repeat_ngram_size > 1:
+                    # Use the same trimmed sequence we conditioned on
+                    for b in range(B):
+                        _apply_no_repeat_ngram_block(logits[b], idx_cond[b], no_repeat_ngram_size)
+
+                # === Sample / Greedy
+                if temperature is not None and temperature <= 0.0:
+                    next_token = torch.argmax(logits, dim=-1, keepdim=True)
+                else:
+                    probs = torch.softmax(logits, dim=-1)
+                    nan_rows = torch.isnan(probs).any(dim=-1)
+                    if nan_rows.any():
+                        next_token = torch.argmax(logits, dim=-1, keepdim=True)
+                    else:
+                        next_token = torch.multinomial(probs, num_samples=1)
+
+                # Append
+                idx = torch.cat([idx, next_token], dim=1)
+
+                # Early stop on EOS for all
+                if eos_id is not None and torch.all(next_token.squeeze(-1) == eos_id):
+                    break
+
+        model.train()
+        return idx
+
+
+    # Ex: top_p=0.9 and optionally temperature > 0.7
+    def generate_V1(
     self,
     model,
     idx: torch.Tensor,                  # [B, T] token ids (usually B=1 for sampling)
@@ -699,6 +872,7 @@ class Opal:
             print(f"\n🔄 === EPOCH {epoch+1}/{num_epochs} STARTING ===")
             print(f"📊 Best validation loss so far: {best_val_loss:.6f}")
             print(f"📊 Epochs without improvement: {epochs_no_improve}")
+            print(f"Model learning rate {self.config.get('learning_rate', 0):.6f}")
 
             # Create a progress bar for the training data
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
@@ -786,6 +960,14 @@ class Opal:
                             scheduler.step()
 
                     global_step += 1
+                    
+                    # Generate sample every 1000 iterations to monitor quality (AFTER increment)
+                    if global_step > 0 and global_step % 1000 == 0:
+                        print(f"\n🎯 === GENERATION SAMPLE AT STEP {global_step} ===")
+                        self.generate_with_topk(
+                            model, tokenizer, device, start_context, top_k=50
+                        )
+                        print(f"🎯 ============================================\n")
                     
                     # Update progress bar with accumulated loss
                     if hasattr(loss, 'item'):
@@ -1820,6 +2002,7 @@ class Opal:
         # ----------------------------------------
         # Optimizer
         # ----------------------------------------
+        print(f"Creating adaptive optimizer with learning rate: {lr}")
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         if optimizer_state_dict:
             optimizer.load_state_dict(optimizer_state_dict)

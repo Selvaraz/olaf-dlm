@@ -179,6 +179,7 @@ def model_pretrain_test(start_fresh=False):
             start_fresh=start_fresh,
             eval_iter=eval_iter,
             eval_freq=eval_freq,
+            lr=OPAL_MODEL_CONFIG["learning_rate"],
             start_context="Show me the IP routing table configuration",
         )
         

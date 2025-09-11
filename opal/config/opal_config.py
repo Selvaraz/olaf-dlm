@@ -195,7 +195,7 @@ else:
     TRAINING_CONFIG = _TRAINING_CONFIG_GPU if USE_GPU else _TRAINING_CONFIG_CPU
 
 
-OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_FINETUNE_45M
+# OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_FINETUNE_45M
 # ---- Small-model efficiency flags (defaults) ----
 for _cfg_name, _cfg in list(globals().items()):
     if isinstance(_cfg, dict) and _cfg.get("vocab_size") and _cfg.get("emb_dim"):
