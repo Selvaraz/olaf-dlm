@@ -174,6 +174,26 @@ class OpalFinetuneDataset(Dataset):
             if eos_token is not None:
                 input_ids = input_ids + [eos_token]
             
+            # CRITICAL: Add bounds checking to prevent CUDA index out of bounds error
+            vocab_size = self.tokenizer.get_piece_size()
+            max_token_id = max(input_ids) if input_ids else -1
+            min_token_id = min(input_ids) if input_ids else -1
+            
+            if max_token_id >= vocab_size:
+                print(f"🚨 CRITICAL ERROR: Token ID {max_token_id} >= vocab_size {vocab_size}")
+                print(f"   Sample text: {full_text[:100]}...")
+                print(f"   Out of bounds tokens: {[t for t in input_ids if t >= vocab_size]}")
+                # Skip this sample to prevent CUDA error
+                print(f"   → Skipping this sample to prevent training crash")
+                continue
+            
+            if min_token_id < 0:
+                print(f"⚠️ WARNING: Negative token ID {min_token_id} found")
+                print(f"   Sample text: {full_text[:100]}...")
+                # Replace negative tokens with UNK token
+                unk_id = self.tokenizer.unk_id() if hasattr(self.tokenizer, 'unk_id') and self.tokenizer.unk_id() >= 0 else 0
+                input_ids = [max(0, min(t, vocab_size-1)) if t >= 0 else unk_id for t in input_ids]
+            
             # Encode the prompt part with marker to determine masking boundary more accurately
             prompt_with_marker = f"{prompt_marker} {prompt} {response_marker}"
             prompt_ids = self.tokenizer.encode(prompt_with_marker, out_type=int)
@@ -193,6 +213,15 @@ class OpalFinetuneDataset(Dataset):
             # Ensure labels are also truncated to match input_ids length
             if len(labels) > self.max_length:
                 labels = labels[:self.max_length]
+
+            # CRITICAL: Validate label token IDs to prevent CUDA errors
+            valid_label_tokens = [l for l in labels if l != -100]
+            if valid_label_tokens:
+                max_label_token = max(valid_label_tokens)
+                if max_label_token >= vocab_size:
+                    print(f"🚨 CRITICAL ERROR: Label token ID {max_label_token} >= vocab_size {vocab_size}")
+                    print(f"   → Skipping this sample to prevent training crash")
+                    continue
 
             # Debug: Print first few samples to verify format
             if len(samples) < 3:  # Only for first few samples

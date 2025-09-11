@@ -53,7 +53,17 @@ class Opal:
         This function is used by the DataLoader to pad input and label tensors
         to a uniform size for the current batch.
         """
+        # CRITICAL FIX: Ensure pad_id is within vocab bounds to prevent CUDA index errors
+        vocab_size = self.tokenizer.get_piece_size()
         pad_id = self.tokenizer.pad_id() if self.tokenizer.pad_id() >= 0 else self.tokenizer.unk_id()
+        
+        # Validate pad_id is within bounds
+        if pad_id >= vocab_size:
+            print(f"🚨 CRITICAL: pad_id {pad_id} >= vocab_size {vocab_size}")
+            print(f"   → Using 0 as pad_id to prevent CUDA error")
+            pad_id = 0  # Use 0 as fallback
+        
+        print(f"📊 Collate batch: pad_id={pad_id}, vocab_size={vocab_size}, batch_size={len(batch)}")
 
         # Unzip the batch into separate lists for inputs and labels
         input_ids, labels = zip(*batch)
@@ -77,6 +87,13 @@ class Opal:
         if padded_inputs.size(1) > max_context_length:
             padded_inputs = padded_inputs[:, :max_context_length]
             padded_labels = padded_labels[:, :max_context_length]
+
+        # CRITICAL: Final validation to prevent CUDA errors
+        max_input_token = padded_inputs.max().item()
+        if max_input_token >= vocab_size:
+            print(f"🚨 CRITICAL: Final batch contains token {max_input_token} >= vocab_size {vocab_size}")
+            print(f"   → Clipping out-of-bounds tokens to prevent crash")
+            padded_inputs = torch.clamp(padded_inputs, 0, vocab_size - 1)
 
         return padded_inputs, padded_labels
 

@@ -78,7 +78,12 @@ _GPT_CONFIG_OPAL_45M = {
     "max_grad_norm": 1.0,               # ✅ Add gradient clipping
     "kv_heads" : 1,                # MQA
     "use_rope": True,              # Rotary pos embeddings
-    "tie_embeddings": True          # Tie input/output embeddings
+    "tie_embeddings": True,        # Tie input/output embeddings
+    # ✅ FIX: Add special token IDs to prevent CUDA index out of bounds (matches sptrainer.py)
+    "pad_id": 0,                   # Safe padding token
+    "bos_id": 1,                   # Beginning of sequence token (matches tokenizer training)
+    "eos_id": 2,                   # End of sequence token (matches tokenizer training)
+    "unk_id": 3                    # Unknown token
 }
 
 _GPT_CONFIG_OPAL_FINETUNE_45M = {
@@ -97,7 +102,13 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
     
     # 🔹 Fine-tuning specific settings
     "warmup_steps": 500,              # 🔧 Much more warmup
-    "lr_scheduler": "cosine",         
+    "lr_scheduler": "cosine",
+    
+    # ✅ FIX: Ensure special tokens are properly configured for fine-tuning
+    "pad_id": 0,                      # Safe padding token  
+    "bos_id": 1,                      # Beginning of sequence token (matches tokenizer training)
+    "eos_id": 2,                      # End of sequence token (matches tokenizer training)
+    "unk_id": 3                       # Unknown token
 }
 
 _GPT_CONFIG_OPAL_GPU_45M = {
@@ -150,7 +161,7 @@ def set_finetune_mode(enable_finetune=True):
         print(f"   → Batch size: {TRAINING_CONFIG['batch_size']}, Epochs: {OPAL_MODEL_CONFIG['num_epoch']}")
     else:
         print("🚀 Switching to PRETRAINING configuration...")
-        OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_20M
+        OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_45M
         TRAINING_CONFIG = _TRAINING_CONFIG_GPU if USE_GPU else _TRAINING_CONFIG_CPU
         print(f"   → Model: {OPAL_MODEL_CONFIG['emb_dim']}D, LR: {OPAL_MODEL_CONFIG['learning_rate']}")
         print(f"   → Batch size: {TRAINING_CONFIG['batch_size']}, Epochs: {OPAL_MODEL_CONFIG['num_epoch']}")
@@ -174,7 +185,7 @@ if FINETUNE_MODE:
         "batch_size": 8 if USE_GPU else 2,  # 🔧 Smaller batches for stable fine-tuning
     }
 else:
-    # Use pretraining configs
+    # Use pretraining configs  
     OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_45M
     TRAINING_CONFIG = _TRAINING_CONFIG_GPU if USE_GPU else _TRAINING_CONFIG_CPU
 
