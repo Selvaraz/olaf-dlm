@@ -213,13 +213,13 @@ class OpalFinetuneDataset(Dataset):
             bos_token = self.tokenizer.bos_id() if hasattr(self.tokenizer, 'bos_id') and self.tokenizer.bos_id() >= 0 else None
             eos_token = self.tokenizer.eos_id() if hasattr(self.tokenizer, 'eos_id') and self.tokenizer.eos_id() >= 0 else None
             
-            # Use a more standard chat format that's better for fine-tuning
-            # This follows the format used by many successful chat models
-            system_prompt = "You are Olaf, a helpful network troubleshooting assistant. Provide clear, step-by-step solutions for network configuration and debugging tasks."
+            # Add clear separators to help the model distinguish prompt from response
+            # Use tokens that are likely in the vocabulary
+            prompt_marker = "<USER>"
+            response_marker = "<ASSISTANT>"
             
-            # Build the full sequence with proper chat formatting
-            # This format is more likely to be recognized by the tokenizer
-            full_text = f"System: {system_prompt}\n\nUser: {prompt}\n\nAssistant: {response_text}"
+            # Build the full sequence with clear structure
+            full_text = f"{prompt_marker} {prompt} {response_marker} {response_text}"
             
             # Encode the full text
             input_ids = self.tokenizer.encode(full_text, out_type=int)
@@ -232,10 +232,9 @@ class OpalFinetuneDataset(Dataset):
             if eos_token is not None:
                 input_ids = input_ids + [eos_token]
             
-            # Encode the prompt part to determine masking boundary more accurately
-            # We want to mask everything up to and including "Assistant: "
-            prompt_with_system = f"System: {system_prompt}\n\nUser: {prompt}\n\nAssistant: "
-            prompt_ids = self.tokenizer.encode(prompt_with_system, out_type=int)
+            # Encode the prompt part with marker to determine masking boundary more accurately
+            prompt_with_marker = f"{prompt_marker} {prompt} {response_marker}"
+            prompt_ids = self.tokenizer.encode(prompt_with_marker, out_type=int)
             if bos_token is not None:
                 prompt_ids = [bos_token] + prompt_ids
                 
@@ -258,16 +257,12 @@ class OpalFinetuneDataset(Dataset):
                 print(f"   → Sample {len(samples) + 1} debug:")
                 print(f"     Prompt: {prompt[:100]}...")
                 print(f"     Response length: {len(response_text)} chars")
-                print(f"     Full text: {full_text[:200]}...")
+                print(f"     Full text: {full_text[:150]}...")
                 print(f"     Input IDs length: {len(input_ids)}, Prompt boundary: {prompt_len}")
                 
                 # Check if response_text is properly structured JSON
                 if isinstance(item["response"], dict):
                     print(f"     JSON keys: {list(item['response'].keys())}")
-                
-                # Show the actual masking boundary
-                decoded_prompt_part = self.tokenizer.decode(input_ids[:prompt_len])
-                print(f"     Masked portion: {decoded_prompt_part[:100]}...")
 
             samples.append({
                 "input_ids": torch.tensor(input_ids, dtype=torch.long),
