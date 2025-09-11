@@ -106,7 +106,7 @@ class Opal:
         self,
         data_jsonl: str,              # path to JSONL file for fine-tuning
         batch_size: int = None,
-        max_length: int = 1024,
+        max_length: int = 512,
         shuffle: bool = True,
         drop_last: bool = True,
         num_workers: int = 0,
@@ -145,6 +145,9 @@ class Opal:
         dataset = OpalFinetuneDataset(
             data=data,
             tokenizer=self.tokenizer,
+            return_weights=True,  # Always return weights for fine-tuning
+            max_length=max_length,
+            commands_weight=3.0,  # Emphasize command tokens
         )
 
         # Set batch size
