@@ -11,7 +11,6 @@ import time
 import os
 import shutil
 import psutil
-import git
 import tempfile
 import atexit
 from opal.dataloader.OpalFileDataSet import OpalFileDataset
@@ -31,7 +30,7 @@ import sentencepiece as spm
 from tqdm import tqdm
 from ..export.opal_evaluator import evaluate_pytorch, evaluate_onnx
 from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR
-
+import torch.nn.functional as F
 #For TensorBoard logging
 from torch.utils.tensorboard import SummaryWriter
 # For weights and biases logging
@@ -49,37 +48,33 @@ class Opal:
         self.finetune_data_path = finetune_data_path
     
     def collate_finetune(self, batch):
-        """
-        Dynamically pads a batch of fine-tuning samples to the longest sequence.
-        This function is used by the DataLoader to pad input and label tensors
-        to a uniform size for the current batch.
-        """
-        pad_id = self.tokenizer.pad_id() if self.tokenizer.pad_id() >= 0 else self.tokenizer.unk_id()
+        from torch.nn.utils.rnn import pad_sequence
+        cols = list(zip(*batch))
+        if len(cols) == 3:
+            inputs, labels, weights = cols
+        else:
+            inputs, labels = cols
+            weights = [torch.tensor([1.0 if int(t) != -100 else 0.0 for t in lab], dtype=torch.float32) for lab in labels]
 
-        # Unzip the batch into separate lists for inputs and labels
-        input_ids, labels = zip(*batch)
+        pad_id = 0
+        max_ctx = 512
+        try:
+            from ..config.opal_config import OPAL_MODEL_CONFIG as _OPAL_MODEL_CONFIG
+            pad_id = int(_OPAL_MODEL_CONFIG.get("pad_id", 0))
+            max_ctx = int(_OPAL_MODEL_CONFIG.get("context_length", 512))
+        except Exception:
+            pass
 
-        # Pad the input tensors
-        padded_inputs = torch.nn.utils.rnn.pad_sequence(
-            input_ids,
-            batch_first=True,
-            padding_value=pad_id
-        )
+        padded_inputs  = pad_sequence(inputs,  batch_first=True, padding_value=pad_id)
+        padded_labels  = pad_sequence(labels,  batch_first=True, padding_value=-100)
+        padded_weights = pad_sequence(weights, batch_first=True, padding_value=0.0)
 
-        # Pad the labels tensors, using -100 to ignore loss on padded tokens
-        padded_labels = torch.nn.utils.rnn.pad_sequence(
-            labels,
-            batch_first=True,
-            padding_value=-100
-        )
+        if padded_inputs.size(1) > max_ctx:
+            padded_inputs  = padded_inputs[:, :max_ctx]
+            padded_labels  = padded_labels[:, :max_ctx]
+            padded_weights = padded_weights[:, :max_ctx]
 
-        # FINETUNE_PH2: Enforce max context length to prevent memory issues
-        max_context_length = self.config.get("context_length", 512)
-        if padded_inputs.size(1) > max_context_length:
-            padded_inputs = padded_inputs[:, :max_context_length]
-            padded_labels = padded_labels[:, :max_context_length]
-
-        return padded_inputs, padded_labels
+        return padded_inputs, padded_labels, padded_weights
 
     def collate_unused_finetune(self, batch):
         """Return a tuple (input_ids, labels) to match the model's forward(input, labels) signature."""
@@ -362,130 +357,180 @@ class Opal:
             print(f"✅ Pre-tokenized dataset saved to {pretokenized_path}")
             return torch.load(pretokenized_path)
 
-    # Ex: top_p=0.9 and optionally temperature > 0.7
-    def generate(self, model, idx, max_new_tokens, context_size, 
-                    temperature=0.0, top_k=None, top_p=None, 
-                    eos_id=None, repetition_penalty=1.2):
+    # ----
 
-        # The following loop generates one token at a time, for a total
-        # of max_new_tokens iterations. At each iteration, the model
-        # is fed the current sequence (idx) and generates a new token.
-        # The new token is then appended to the current sequence, and
-        # the loop continues until max_new_tokens tokens have been
-        # generated.
-        for _ in range(max_new_tokens):
-            # Get the last `context_size` tokens as input (context window)
-            idx_cond = idx[:, -context_size:]
+    def generate(
+    self,
+    model,
+    idx: torch.Tensor,                  # [B, T]
+    max_new_tokens: int,
+    context_size: int,                  # model’s max context length
+    top_k: int | None = None,
+    top_p: float | None = None,         # (0,1]
+    temperature: float = 1.0,           # 0 => greedy
+    eos_id: int | None = None,
+    repetition_penalty: float = 1.0,    # multiplicative (GPT-2 style)
+    # 🔽 Anti-repetition knobs (new)
+    no_repeat_ngram_size: int | None = 3,     # e.g., 3 to block tri-gram repeats
+    presence_penalty: float = 0.0,            # additive: -beta if token seen in window
+    frequency_penalty: float = 0.0,           # additive: -alpha * count in window
+    penalty_window: int = 64,                  # window for presence/frequency penalties
+    max_consecutive_repeats: int = 3,         # if the last token already occurs N times tailing, ban it
+    ) -> torch.Tensor:
+        """
+        Decoding with top-k / top-p, temperature, improved repetition penalty,
+        plus no-repeat n-gram, presence/frequency penalties, and max-consecutive guard.
+        Uses scatter()/masked_fill() for top-p to avoid CUDA indexing asserts.
+        """
+        model.eval()
+        device = idx.device
+        B = idx.size(0)
+        assert B >= 1
 
-            # Perform inference to get logits for the next token
-            with torch.no_grad():
+        def _apply_no_repeat_ngram_block(logits_row: torch.Tensor, seq_row: torch.Tensor, n: int):
+            """In-place: set logits of tokens that would create a repeated n-gram to -inf (B=1 fast path; loops are fine)."""
+            if n is None or n <= 1 or seq_row.numel() < n - 1:
+                return
+            # Build map of (n-1)-gram -> set(next_token) from history
+            history = seq_row.tolist()
+            prefix_to_next = {}
+            for i in range(len(history) - n + 1):
+                prefix = tuple(history[i:i + n - 1])
+                nxt = history[i + n - 1]
+                s = prefix_to_next.get(prefix)
+                if s is None:
+                    s = set()
+                    prefix_to_next[prefix] = s
+                s.add(nxt)
+            # Current prefix (last n-1)
+            cur_prefix = tuple(history[-(n - 1):]) if n - 1 > 0 else tuple()
+            if cur_prefix in prefix_to_next:
+                bad_next = prefix_to_next[cur_prefix]
+                for tok in bad_next:
+                    if 0 <= tok < logits_row.numel():
+                        logits_row[tok] = float("-inf")
+
+        def _apply_presence_frequency_penalties(logits_row: torch.Tensor, recent_row: torch.Tensor):
+            """Additive penalties (OpenAI-style): subtract alpha*count + beta*1{seen}."""
+            if (presence_penalty <= 0.0) and (frequency_penalty <= 0.0):
+                return
+            # Count in a small recent window
+            vals, counts = recent_row.unique(return_counts=True)
+            # Only penalize valid ids
+            V = logits_row.numel()
+            m = (vals >= 0) & (vals < V)
+            if m.any():
+                vals = vals[m]
+                counts = counts[m].to(logits_row.dtype)
+                # logits[tok] -= frequency_penalty * count + presence_penalty * 1
+                # Do it in vectorized chunks
+                for tok, c in zip(vals.tolist(), counts.tolist()):
+                    logits_row[tok] -= (frequency_penalty * c + presence_penalty * 1.0)
+
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                # Trim to model context
+                idx_cond = idx[:, -context_size:]
+
                 model_output = model(idx_cond)
-            
-            logits = model_output["logits"] if isinstance(model_output, dict) else model_output
-            logits = logits[:, -1, :]  # ✅ Take only last token logits
+                logits = model_output["logits"] if isinstance(model_output, dict) else model_output
+                logits = logits[:, -1, :]  # [B, V] next-token logits
+                V = logits.size(-1)
 
-            #logits = model_output["logits"][0, -1, :]  # Take logits of the last token position
-            for token in set(idx[0].tolist()):
-                logits[:, token] /= repetition_penalty
+                # === Improved repetition penalty (multiplicative, recent window 20)
+                if repetition_penalty and repetition_penalty > 1.0:
+                    window = min(20, idx_cond.size(1))
+                    recent = idx_cond[:, -window:].clamp_(0, V - 1)
+                    for b in range(B):
+                        recent_b = recent[b]
+                        token_positions = {}
+                        for i_pos, tok in enumerate(recent_b.tolist()):
+                            token_positions.setdefault(tok, []).append(i_pos)
+                        for tok, positions in token_positions.items():
+                            if len(positions) <= 1 or tok < 0 or tok >= V:
+                                continue
+                            freq_pen = repetition_penalty ** len(positions)
+                            if positions[-1] >= window - 3:  # last-3 boost
+                                freq_pen *= 1.5
+                            if logits[b, tok] > 0:
+                                logits[b, tok] = logits[b, tok] / freq_pen
+                            else:
+                                logits[b, tok] = logits[b, tok] * freq_pen
 
-            #  Apply temperature scaling (makes probabilities sharper or smoother)
-            if temperature > 0.0:
-                logits = logits / temperature
+                # === Additive presence/frequency penalties on a larger window
+                if (presence_penalty > 0.0) or (frequency_penalty > 0.0):
+                    win = min(penalty_window, idx_cond.size(1))
+                    recent_big = idx_cond[:, -win:].clamp_(0, V - 1)
+                    for b in range(B):
+                        _apply_presence_frequency_penalties(logits[b], recent_big[b])
 
-            # Optional: Top-k filtering (keep only the top-k highest probability tokens)
-            if top_k is not None:
-                # Get top-k logits
-                top_logits, _ = torch.topk(logits, top_k)
-                min_val = top_logits[:, -1]  # Smallest value among top-k
-                # Replace logits below the kth value with -inf so they are ignored
-                logits = torch.where(
-                    logits < min_val,
-                    torch.tensor(float('-inf')).to(logits.device),
-                    logits
-                )
+                # === Max consecutive token guard
+                if max_consecutive_repeats and max_consecutive_repeats > 0:
+                    for b in range(B):
+                        last = int(idx[b, -1].item())
+                        # count tail run length of 'last'
+                        run = 1
+                        j = idx.size(1) - 2
+                        while j >= 0 and int(idx[b, j].item()) == last:
+                            run += 1
+                            if run >= max_consecutive_repeats:
+                                # Ban the last token to force diversity
+                                if 0 <= last < V:
+                                    logits[b, last] = float("-inf")
+                                break
+                            j -= 1
 
-            # 🔹  Top-p (nucleus) filtering
-            # Instead of a fixed k, this dynamically keeps the smallest set of tokens
-            # whose cumulative probability ≤ p.
-            if top_p is not None:
-                # Sort logits in descending order
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                # Convert logits to probabilities
-                probs = torch.softmax(sorted_logits, dim=-1)
-                # Compute cumulative probabilities
-                cumulative_probs = torch.cumsum(probs, dim=-1)
+                # === Temperature
+                if temperature is not None and temperature > 0.0:
+                    logits = logits / temperature
 
-                # Identify tokens where cumulative probability > p
-                sorted_indices_to_remove = cumulative_probs > top_p
-                # Shift mask so that the first token above p is kept
-                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                sorted_indices_to_remove[..., 0] = 0  # Always keep the highest probability token
+                # === Top-k
+                if top_k is not None and 0 < top_k < V:
+                    topk_vals, _ = logits.topk(top_k, dim=-1)
+                    kth = topk_vals[..., -1, None]
+                    logits = torch.where(logits < kth, torch.full_like(logits, float('-inf')), logits)
 
-                # Set logits of removed tokens to -inf
-                logits[sorted_indices[sorted_indices_to_remove]] = float("-inf")
+                # === Top-p (nucleus) with scatter-back (batched-safe)
+                if top_p is not None and 0.0 < top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)  # [B,V]
+                    probs = torch.softmax(sorted_logits, dim=-1)
+                    cumulative_probs = probs.cumsum(dim=-1)
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = False
+                    indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)
+                    indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
+                    logits = logits.masked_fill(indices_to_remove, float('-inf'))
 
-            # Choose next token
-            if temperature > 0.0:
-                # If temperature > 0, sample from probability distribution
-                probs = torch.softmax(logits, dim=-1)  # Convert logits to probabilities
-                idx_next = torch.multinomial(probs, num_samples=1)  # Random sampling
-            else:
-                # Greedy decoding: pick the token with highest logit
-                idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+                # === No-repeat n-gram blocking (applied *after* k/p filtering)
+                if no_repeat_ngram_size and no_repeat_ngram_size > 1:
+                    # Use the same trimmed sequence we conditioned on
+                    for b in range(B):
+                        _apply_no_repeat_ngram_block(logits[b], idx_cond[b], no_repeat_ngram_size)
 
-            # Stop early if EOS (end-of-sequence) token is generated
-            if eos_id is not None and idx_next.item() == eos_id:
-                break
+                # === Sample / Greedy
+                if temperature is not None and temperature <= 0.0:
+                    next_token = torch.argmax(logits, dim=-1, keepdim=True)
+                else:
+                    probs = torch.softmax(logits, dim=-1)
+                    nan_rows = torch.isnan(probs).any(dim=-1)
+                    if nan_rows.any():
+                        next_token = torch.argmax(logits, dim=-1, keepdim=True)
+                    else:
+                        next_token = torch.multinomial(probs, num_samples=1)
 
-            # Append the predicted token to the sequence
-            idx = torch.cat((idx, idx_next), dim=1)  # Sequence grows by 1 token
+                # Append
+                idx = torch.cat([idx, next_token], dim=1)
 
+                # Early stop on EOS for all
+                if eos_id is not None and torch.all(next_token.squeeze(-1) == eos_id):
+                    break
+
+        model.train()
         return idx
 
 
-    def generate_v0(self, model, idx, max_new_tokens, context_size, temperature=0.0, top_k=None, eos_id=None):
-
-         
-        # The following loop generates one token at a time, for a total
-        # of max_new_tokens iterations. At each iteration, the model
-        # is fed the current sequence (idx) and generates a new token.
-        # The new token is then appended to the current sequence, and
-        # the loop continues until max_new_tokens tokens have been
-        # generated.
-        for _ in range(max_new_tokens):
-            idx_cond = idx[:, -context_size:]
-            with torch.no_grad():
-                model_output = model(idx_cond)
-            logits = model_output["logits"][0, -1, :]
-
-            #  Filter logits with top_k sampling
-            if top_k is not None:
-                # Keep only top_k values
-                top_logits, _ = torch.topk(logits, top_k)
-                min_val = top_logits[:, -1]
-                logits = torch.where(logits < min_val, torch.tensor(float('-inf')).to(logits.device), logits)
-
-            #  Apply temperature scaling
-            if temperature > 0.0:
-                logits = logits / temperature
-
-                # Apply softmax to get probabilities
-                probs = torch.softmax(logits, dim=-1)  # (batch_size, context_len)
-
-                # Sample from the distribution
-                idx_next = torch.multinomial(probs, num_samples=1)  # (batch_size, 1)
-
-            # Otherwise same as before: get idx of the vocab entry with the highest logits value
-            else:
-                idx_next = torch.argmax(logits, dim=-1, keepdim=True)  # (batch_size, 1)
-
-            if idx_next == eos_id:  # Stop generating early if end-of-sequence token is encountered and eos_id is specified
-                break
-
-            # Same as before: append sampled index to the running sequence
-            idx = torch.cat((idx, idx_next), dim=1)  # (batch_size, num_tokens+1)
-
-        return idx
+    
 
     def train_model_simple(self, model, train_loader, val_loader, 
                         optimizer, scheduler, device, num_epochs,
@@ -503,13 +548,29 @@ class Opal:
         use_mixed_precision = TRAINING_CONFIG.get("mixed_precision", False)
         max_grad_norm = self.config.get("max_grad_norm", 1.0)
         
+        # 🚨 CRITICAL FIX: Use LOWER gradient accumulation for fine-tuning to prevent CUDA errors
+        if self.is_finetune:
+            default_accumulation = 1  # 🚨 REDUCED: Lower for fine-tuning stability
+        else:
+            default_accumulation = 4  # Standard for pretraining
+            
+        gradient_accumulation_steps = self.config.get("gradient_accumulation_steps", default_accumulation)
+
+        # # 🚨 CRITICAL FIX: Force disable mixed precision for fine-tuning to prevent CUDA errors
+        # if self.is_finetune:
+        #     use_mixed_precision = False
+        #     print(f"🔧 Mixed precision FORCED OFF for fine-tuning stability")
+        
         scaler = get_scaler() if use_mixed_precision else None
 
         # FINETUNE_PH2: Adaptive Warmup - both pretraining and fine-tuning benefit from warmup
-        total_steps = num_epochs * len(train_loader)
+        # Adjust total steps for gradient accumulation
+        steps_per_epoch = len(train_loader) // gradient_accumulation_steps
+        total_steps = num_epochs * steps_per_epoch
         if self.is_finetune:
             # Fine-tuning: lighter warmup (2% of total steps or configured warmup_steps)
-            warmup_steps = min(self.config.get("warmup_steps", int(total_steps * 0.02)), int(total_steps * 0.1))
+            #warmup_steps = min(self.config.get("warmup_steps", int(total_steps * 0.02)), int(total_steps * 0.1))
+            warmup_steps =  int(total_steps * 0.03)
         else:
             # Pretraining: standard warmup (5% of total steps)
             warmup_steps = int(total_steps * 0.05)
@@ -518,7 +579,10 @@ class Opal:
         print(f"📊 Mode: {'FINE-TUNING' if self.is_finetune else 'PRETRAINING'}")
         print(f"📊 Training setup: {total_steps:,} total steps, {warmup_steps:,} warmup steps")
         print(f"📊 Epochs: {num_epochs}, Batches per epoch: {len(train_loader):,}")
+        print(f"📊 Effective batches per epoch (with accumulation): {steps_per_epoch:,}")
         print(f"📊 Batch size: {len(train_loader.dataset) // len(train_loader)}")
+        print(f"📊 Gradient accumulation steps: {gradient_accumulation_steps}")
+        print(f"📊 Effective batch size: {(len(train_loader.dataset) // len(train_loader)) * gradient_accumulation_steps}")
         print(f"📊 Evaluation frequency: every {eval_freq} steps, {eval_iter} batches per eval")
         print(f"📊 Early stopping patience: {early_stopping_patience} epochs")
         print(f"📊 Mixed precision: {use_mixed_precision}")
@@ -544,6 +608,10 @@ class Opal:
             print(f"\n🔄 === EPOCH {epoch+1}/{num_epochs} STARTING ===")
             print(f"📊 Best validation loss so far: {best_val_loss:.6f}")
             print(f"📊 Epochs without improvement: {epochs_no_improve}")
+            
+            # 🔍 DEBUG: Check what's actually in self.config
+            if 'learning_rate' in self.config:
+                print(f"🔍 DEBUG: self.config['learning_rate']: {self.config['learning_rate']}")
 
             # Create a progress bar for the training data
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
@@ -551,16 +619,24 @@ class Opal:
 
             epoch_best_val_loss = best_val_loss  # Track best val loss for this epoch
 
-            # Training loop with standard per-batch gradient updates
-            for batch_idx, (input_ids, targets) in enumerate(pbar):
-                # Zero gradients at the start of each batch
-                optimizer.zero_grad(set_to_none=True)
+            # Initialize gradient accumulation for this epoch
+            optimizer.zero_grad(set_to_none=True)
 
-                # Move input and target tensors to the specified device
+            # Training loop with gradient accumulation
+            accumulated_loss = 0.0
+            for batch_idx, (input_ids, targets, weights) in enumerate(pbar):
+                # Move input and targ`et tensors to the specified device
                 input_ids = input_ids.to(device, non_blocking=True)
                 targets = targets.to(device, non_blocking=True)
+                if weights is not None:
+                    weights = weights.to(device, non_blocking=True)
 
-                loss = self.calc_loss_batch(input_ids, targets, model, device)
+                # Calculate loss for this batch
+                loss = self.calc_loss_batch(input_ids, targets, weights, model, device)
+                
+                # Scale loss by gradient accumulation steps to get the average
+                loss = loss / gradient_accumulation_steps
+                accumulated_loss += loss.item()
 
                 # Safety check for NaN or infinite loss
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -569,139 +645,171 @@ class Opal:
                     continue
 
                 # Backpropagation with mixed precision if enabled
-                total_norm = 0.0  # For gradient norm calculation
-
                 if use_mixed_precision:
                     scaler.scale(loss).backward()
-                    # Unscale gradients before clipping
-                    scaler.unscale_(optimizer)
-                    
-                    # Calculate gradient norm for logging
-                    for p in model.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            total_norm += param_norm.item() ** 2
-                    total_norm = total_norm ** 0.5
-
-                    # Clip gradients
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-                    scaler.step(optimizer)
-                    scaler.update()
                 else:
                     loss.backward()
-                    # Calculate gradient norm for logging
-                    for p in model.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            total_norm += param_norm.item() ** 2
-                    total_norm = total_norm ** 0.5
+
+                # Only update weights every gradient_accumulation_steps
+                is_accumulation_step = (batch_idx + 1) % gradient_accumulation_steps == 0
+                is_last_batch = batch_idx == len(train_loader) - 1
+                
+                if is_accumulation_step or is_last_batch:
+                    total_norm = 0.0  # For gradient norm calculation
                     
-                    # Clip gradients and step optimizer
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-                    optimizer.step()
+                    if use_mixed_precision:
+                        # Unscale gradients before clipping
+                        scaler.unscale_(optimizer)
+                        
+                        # Calculate gradient norm for logging
+                        for p in model.parameters():
+                            if p.grad is not None:
+                                param_norm = p.grad.data.norm(2)
+                                total_norm += param_norm.item() ** 2
+                        total_norm = total_norm ** 0.5
 
-                # Update learning rate and global step
-                if global_step < warmup_steps:
-                    warmup_scheduler.step()
-                elif global_step == warmup_steps:
-                    current_lr = optimizer.param_groups[0]["lr"]
-                    print(f"\n🔥 WARMUP COMPLETED! Transitioning to cosine annealing at step {global_step+1}")
-                    print(f"🔥 Learning rate at warmup completion: {current_lr:.2e}")
-                    if scheduler:
-                        scheduler.step()
-                else:
-                    if scheduler:
-                        scheduler.step()
+                        # Clip gradients
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                        scaler.step(optimizer)
+                        scaler.update()
+            
+                    else:
+                        # Calculate gradient norm for logging
+                        for p in model.parameters():
+                            if p.grad is not None:
+                                param_norm = p.grad.data.norm(2)
+                                total_norm += param_norm.item() ** 2
+                        total_norm = total_norm ** 0.5
+                        
+                        # Clip gradients and step optimizer
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                        optimizer.step()
 
-                global_step += 1
+                    # Zero gradients after weight update
+                    optimizer.zero_grad(set_to_none=True)
+
+                    # Update learning rate and global step only after actual weight updates
+                    if global_step < warmup_steps:
+                        warmup_scheduler.step()
+                    elif global_step == warmup_steps:
+                        current_lr = optimizer.param_groups[0]["lr"]
+                        print(f"\n🔥 WARMUP COMPLETED! Transitioning to cosine annealing at step {global_step+1}")
+                        print(f"🔥 Learning rate at warmup completion: {current_lr:.2e}")
+                        if scheduler:
+                            scheduler.step()
+                    else:
+                        if scheduler:
+                            scheduler.step()
+
+                    global_step += 1
+                    
+                    # Generate sample every 1000 iterations to monitor quality (AFTER increment)
+                    # if global_step > 0 and global_step % 1000 == 0:
+                    #     print(f"\n🎯 === GENERATION SAMPLE AT STEP {global_step} ===")
+                    #     self.generate_with_topk(
+                    #         model, tokenizer, device, start_context, top_k=50
+                    #     )
+                    #     print(f"🎯 ============================================\n")
+                    
+                    # Update progress bar with accumulated loss
+                    if hasattr(loss, 'item'):
+                        pbar.set_postfix({
+                            'acc_loss': f'{accumulated_loss:.4f}',
+                            'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
+                            'tokens': f'{tokens_seen:,}',
+                            'acc_step': f'{(batch_idx + 1) // gradient_accumulation_steps + 1}'
+                        })
+                    
+                    # Reset accumulated loss
+                    accumulated_loss = 0.0
+
+                # Update tokens seen for every batch (not just accumulation steps)
                 tokens_seen += input_ids.numel()
 
-                # Update progress bar
-                if hasattr(loss, 'item'):
-                    pbar.set_postfix({
-                        'loss': f'{loss.item():.4f}',
-                        'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
-                        'tokens': f'{tokens_seen:,}'
-                    })
+                # Print a sample text after each epoch
+                # self.generate_and_print_sample(
+                #     model, tokenizer, device, start_context
+                # )
 
-                # Evaluation
-                # Adaptive evaluation frequency for pretraining vs fine-tuning
-                eval_frequency = eval_freq if not self.is_finetune else max(eval_freq * 4, 100)
-                if global_step % eval_frequency == 0 and global_step > 0:
-                    train_loss, val_loss = self.evaluate_model(
-                        model, train_loader, val_loader, device, eval_iter)
-                    train_losses.append(train_loss)
-                    val_losses.append(val_loss)
-                    track_tokens_seen.append(tokens_seen)
-                    
-                    # Calculate perplexity from losses
-                    train_perplexity = torch.exp(torch.tensor(train_loss)).item()
-                    val_perplexity = torch.exp(torch.tensor(val_loss)).item()
-                    
-                    # Get current learning rate for logging
-                    current_lr = optimizer.param_groups[0]["lr"]
-                    warmup_progress = min(global_step / warmup_steps, 1.0) if warmup_steps > 0 else 1.0
+                # Evaluation - only check on actual weight update steps
+                if is_accumulation_step or is_last_batch:
+                    # Adaptive evaluation frequency for pretraining vs fine-tuning
+                    eval_frequency = eval_freq if not self.is_finetune else max(eval_freq * 4, 100)
+                    if global_step % eval_frequency == 0 and global_step > 0:
+                        train_loss, val_loss = self.evaluate_model(
+                            model, train_loader, val_loader, device, eval_iter)
+                        train_losses.append(train_loss)
+                        val_losses.append(val_loss)
+                        track_tokens_seen.append(tokens_seen)
+                        
+                        # Calculate perplexity from losses
+                        train_perplexity = torch.exp(torch.tensor(train_loss)).item()
+                        val_perplexity = torch.exp(torch.tensor(val_loss)).item()
+                        
+                        # Get current learning rate for logging
+                        current_lr = optimizer.param_groups[0]["lr"]
+                        warmup_progress = min(global_step / warmup_steps, 1.0) if warmup_steps > 0 else 1.0
+                        
+                        # Early Stopping Logic (best val loss updated here)
+                        if val_loss < best_val_loss:
+                            best_val_loss = val_loss
+                            print(f"🔥 New best val_loss {val_loss:.6f}! Saving checkpoint...")
+                            self.save_model_checkpoint(
+                                self.config, model, optimizer, scheduler,
+                                epoch, train_losses, val_losses,
+                                tokenizer_model=OpalConstants.TOKENIZER_MODEL_PATH
+                            )
+                        else:
+                            print(f"⚠️ No improvement (current: {val_loss:.6f}, best: {best_val_loss:.6f})")
 
-                    # Early Stopping Logic (best val loss updated here)
-                    if val_loss < best_val_loss:
-                        best_val_loss = val_loss
-                        print(f"🔥 New best val_loss {val_loss:.6f}! Saving temporary checkpoint...")
-                        self.save_model_checkpoint(
-                            self.config, model, optimizer, scheduler,
-                            epoch, train_losses, val_losses,
-                            tokenizer_model=OpalConstants.TOKENIZER_MODEL_PATH
-                        )
-                    else:
-                        print(f"⚠️ No improvement at this evaluation (current: {val_loss:.6f}, best: {best_val_loss:.6f})")
+                        # Calculate tokens/sec
+                        elapsed = time.time() - start_time
+                        tokens_per_sec = tokens_seen / max(elapsed, 1e-6)
 
-                    # Calculate tokens/sec
-                    elapsed = time.time() - start_time
-                    tokens_per_sec = tokens_seen / max(elapsed, 1e-6)
+                        # Get memory usage
+                        cpu_mem_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+                        gpu_mem_mb = get_gpu_memory_allocated_size() / (1024 * 1024) if get_gpu_memory_allocated_size() > 0 else 0
+                        
+                        # Enhanced logging with warmup info and perplexity
+                        warmup_status = f"Warmup {warmup_progress:.1%}" if global_step < warmup_steps else "Post-warmup"
+                        mode_prefix = "FT" if self.is_finetune else "PT"
+                        print(f"{mode_prefix} Ep {epoch+1} (Step {global_step:06d}/{total_steps:06d}) {warmup_status}: "
+                            f"Train loss {train_loss:.6f} (PPL {train_perplexity:.2f}), "
+                            f"Val loss {val_loss:.6f} (PPL {val_perplexity:.2f}), "
+                            f"LR {current_lr:.2e}, "
+                            f"CPU mem {cpu_mem_mb:.2f} MB, GPU mem {gpu_mem_mb:.2f} MB, "
+                            f"Tokens/sec {tokens_per_sec:.2f}")
 
-                    # Get memory usage
-                    cpu_mem_mb = psutil.Process().memory_info().rss / (1024 * 1024)
-                    gpu_mem_mb = get_gpu_memory_allocated_size() / (1024 * 1024) if get_gpu_memory_allocated_size() > 0 else 0
-                    
-                    # Enhanced logging with warmup info and perplexity
-                    warmup_status = f"Warmup {warmup_progress:.1%}" if global_step < warmup_steps else "Post-warmup"
-                    mode_prefix = "FT" if self.is_finetune else "PT"
-                    print(f"{mode_prefix} Ep {epoch+1} (Step {global_step:06d}/{total_steps:06d}) {warmup_status}: "
-                        f"Train loss {train_loss:.6f} (PPL {train_perplexity:.2f}), "
-                        f"Val loss {val_loss:.6f} (PPL {val_perplexity:.2f}), "
-                        f"LR {current_lr:.2e}, "
-                        f"CPU mem {cpu_mem_mb:.2f} MB, GPU mem {gpu_mem_mb:.2f} MB, "
-                        f"Tokens/sec {tokens_per_sec:.2f}")
+                        # Log metrics to TensorBoard
+                        if writer:
+                            writer.add_scalar("Loss/train", train_loss, global_step)
+                            writer.add_scalar("Loss/val", val_loss, global_step)
+                            writer.add_scalar("Perplexity/train", train_perplexity, global_step)
+                            writer.add_scalar("Perplexity/val", val_perplexity, global_step)
+                            writer.add_scalar("LearningRate", current_lr, global_step)
+                            writer.add_scalar("WarmupProgress", warmup_progress, global_step)
+                            writer.add_scalar("GradNorm", total_norm, global_step)
+                            writer.add_scalar("Tokens/sec", tokens_per_sec, global_step)
+                            writer.add_scalar("CPU_Memory_MB", cpu_mem_mb, global_step)
+                            if gpu_mem_mb > 0:
+                                writer.add_scalar("GPU_Memory_MB", gpu_mem_mb, global_step)
 
-                    # Log metrics to TensorBoard
-                    if writer:
-                        writer.add_scalar("Loss/train", train_loss, global_step)
-                        writer.add_scalar("Loss/val", val_loss, global_step)
-                        writer.add_scalar("Perplexity/train", train_perplexity, global_step)
-                        writer.add_scalar("Perplexity/val", val_perplexity, global_step)
-                        writer.add_scalar("LearningRate", current_lr, global_step)
-                        writer.add_scalar("WarmupProgress", warmup_progress, global_step)
-                        writer.add_scalar("GradNorm", total_norm, global_step)
-                        writer.add_scalar("Tokens/sec", tokens_per_sec, global_step)
-                        writer.add_scalar("CPU_Memory_MB", cpu_mem_mb, global_step)
-                        if gpu_mem_mb > 0:
-                            writer.add_scalar("GPU_Memory_MB", gpu_mem_mb, global_step)
-
-                    # Log metrics to Weights & Biases
-                    if log_to_wandb:
-                        wandb.log({
-                            "train_loss": train_loss,
-                            "val_loss": val_loss,
-                            "train_perplexity": train_perplexity,
-                            "val_perplexity": val_perplexity,
-                            "lr": current_lr,
-                            "warmup_progress": warmup_progress,
-                            "grad_norm": total_norm,
-                            "tokens_per_sec": tokens_per_sec,
-                            "cpu_memory_mb": cpu_mem_mb,
-                            "gpu_memory_mb": gpu_mem_mb,
-                            "step": global_step,
-                            "mode": "finetune" if self.is_finetune else "pretrain"
-                        })
+                        # Log metrics to Weights & Biases
+                        if log_to_wandb:
+                            wandb.log({
+                                "train_loss": train_loss,
+                                "val_loss": val_loss,
+                                "train_perplexity": train_perplexity,
+                                "val_perplexity": val_perplexity,
+                                "lr": current_lr,
+                                "warmup_progress": warmup_progress,
+                                "grad_norm": total_norm,
+                                "tokens_per_sec": tokens_per_sec,
+                                "cpu_memory_mb": cpu_mem_mb,
+                                "gpu_memory_mb": gpu_mem_mb,
+                                "step": global_step,
+                                "mode": "finetune" if self.is_finetune else "pretrain"
+                            })
 
             # ✅ After each epoch, check if val_loss improved in this epoch
             epoch_duration = time.time() - epoch_start_time
@@ -734,9 +842,19 @@ class Opal:
             #     model, tokenizer, device, start_context
             # )
 
-            self.generate_with_topk(
-                model, tokenizer, device, start_context, top_k=50
-            )
+            if self.is_finetune:
+                self.generate_for_finetune(
+                    model, tokenizer, device, start_context
+                )
+                # Every few epochs, test generation diversity
+                if (epoch + 1) % 3 == 0:  # Every 3rd epoch
+                    self.improve_generation_diversity(
+                        model, tokenizer, device, start_context
+                    )
+            else:
+                self.generate_with_topk(
+                    model, tokenizer, device, start_context, top_k=50
+                )
 
         print(f"\n🎉 === TRAINING COMPLETED SUCCESSFULLY ===")
         print(f"🎉 All {num_epochs} epochs completed!")
@@ -857,18 +975,174 @@ class Opal:
         with torch.no_grad():
             token_ids = self.generate(model=model, idx=encoded, 
                                       context_size=context_size, 
-                                      top_k=top_k, 
-                                      temperature=1.2,
-                                      max_new_tokens=50,
+                                      top_k=40,  # Reduced top_k for less randomness
+                                      top_p=0.85,  # Reduced nucleus sampling for more focus
+                                      temperature=0.7,  # Lower temperature for less randomness
+                                      max_new_tokens=30,  # Shorter outputs to prevent repetition
                                       eos_id=tokenizer.eos_id(),
-                                      repetition_penalty=1.2)
+                                      repetition_penalty=3.0)  # Higher repetition penalty
             decoded_text = self.token_ids_to_text(token_ids)
-            print("\n")
             print("==========================================")
             print(decoded_text.replace("\n", " "))  # Compact print format
             print("==========================================")
+        model.train()
+
+    def generate_for_finetune(self, model, tokenizer, device, start_context):
+        """
+        Specialized generation method for fine-tuning with more conservative settings
+        to avoid repetitive outputs.
+        """
+        model.eval()
+        context_size = model.positional_embeddings.weight.shape[0]
+        encoded = self.text_to_token_ids(start_context).to(device)
+        with torch.no_grad():
+            token_ids = self.generate(model=model, idx=encoded, 
+                                      context_size=context_size, 
+                                      top_k=30,  # More focused top-k
+                                      top_p=0.85,  # Slightly more conservative nucleus sampling
+                                      temperature=0.8,  # Lower temperature for more deterministic output
+                                      max_new_tokens=40,  # Slightly fewer tokens
+                                      eos_id=tokenizer.eos_id(),
+                                      repetition_penalty=3.0)  # Strong repetition penalty
+            decoded_text = self.token_ids_to_text(token_ids)
+            print("\n")
+            print("========== FINE-TUNE GENERATION ==========")
+            print(decoded_text.replace("\n", " "))  # Compact print format
+            print("===========================================")
             print("\n")
         model.train()
+
+    def analyze_finetune_data_quality(self, jsonl_file, sample_size=5):
+        """
+        Analyze fine-tuning data for potential issues that could cause repetitive generation.
+        """
+        print("🔍 === ANALYZING FINE-TUNING DATA QUALITY ===")
+        
+        with open(jsonl_file, "r") as f:
+            lines = f.readlines()
+            
+        print(f"📊 Total examples: {len(lines)}")
+        
+        # Sample some examples for analysis
+        sample_lines = lines[:sample_size] if len(lines) >= sample_size else lines
+        
+        # Track statistics
+        total_prompt_len = 0
+        total_response_len = 0
+        json_responses = 0
+        str_responses = 0
+        complex_structures = 0
+        
+        for i, line in enumerate(sample_lines):
+            item = json.loads(line)
+            prompt = item.get("prompt", "")
+            response = item.get("response", "")
+            
+            total_prompt_len += len(prompt)
+            
+            # Analyze response structure
+            if isinstance(response, str):
+                str_responses += 1
+                response_text = response
+                total_response_len += len(response_text)
+            else:
+                json_responses += 1
+                response_text = json.dumps(response, ensure_ascii=False, separators=(',', ':'))
+                total_response_len += len(response_text)
+                
+                # Check for complex nested structures
+                def count_nesting(obj, level=0):
+                    if isinstance(obj, dict):
+                        return max(count_nesting(v, level + 1) for v in obj.values()) if obj else level
+                    elif isinstance(obj, list):
+                        return max(count_nesting(item, level + 1) for item in obj) if obj else level
+                    return level
+                
+                nesting = count_nesting(response)
+                if nesting > 3:
+                    complex_structures += 1
+            
+            print(f"\n--- Example {i+1} ---")
+            print(f"Prompt length: {len(prompt)} chars")
+            print(f"Response type: {'JSON' if isinstance(response, dict) else 'String'}")
+            print(f"Response length: {len(response_text)} chars")
+            print(f"Prompt: {prompt[:100]}..." if len(prompt) > 100 else f"Prompt: {prompt}")
+            print(f"Response: {response_text[:100]}..." if len(response_text) > 100 else f"Response: {response_text}")
+            
+            # Check for repetitive patterns
+            response_words = response_text.split()
+            word_counts = {}
+            for word in response_words:
+                word_counts[word] = word_counts.get(word, 0) + 1
+            
+            repeated_words = {word: count for word, count in word_counts.items() if count > 3}
+            if repeated_words:
+                print(f"⚠️ Repeated words in response: {repeated_words}")
+        
+        # Print summary statistics
+        print(f"\n� === DATASET SUMMARY ===")
+        print(f"Average prompt length: {total_prompt_len / len(sample_lines):.1f} chars")
+        print(f"Average response length: {total_response_len / len(sample_lines):.1f} chars")
+        print(f"String responses: {str_responses}/{len(sample_lines)}")
+        print(f"JSON responses: {json_responses}/{len(sample_lines)}")
+        print(f"Complex nested structures: {complex_structures}/{json_responses if json_responses > 0 else 1}")
+        
+        if complex_structures > 0:
+            print("⚠️ WARNING: Complex JSON structures detected. Consider simplifying or using structured tokens.")
+        
+        if total_response_len / len(sample_lines) > 500:
+            print("⚠️ WARNING: Very long responses detected. Consider truncating or chunking.")
+            
+        print("�🔍 ==========================================")
+        
+        return {
+            "avg_prompt_len": total_prompt_len / len(sample_lines),
+            "avg_response_len": total_response_len / len(sample_lines),
+            "json_responses": json_responses,
+            "str_responses": str_responses,
+            "complex_structures": complex_structures
+        }
+
+    def improve_generation_diversity(self, model, tokenizer, device, start_context, num_samples=3):
+        """
+        Generate multiple samples with different settings to test diversity.
+        """
+        print("🎯 === TESTING GENERATION DIVERSITY ===")
+        
+        # Test different parameter combinations
+        test_configs = [
+            {"top_k": 25, "top_p": 0.8, "temp": 0.7, "rep_penalty": 3.5, "name": "Conservative"},
+            {"top_k": 40, "top_p": 0.9, "temp": 1.0, "rep_penalty": 2.5, "name": "Balanced"},
+            {"top_k": 60, "top_p": 0.95, "temp": 1.2, "rep_penalty": 2.0, "name": "Creative"},
+            {"top_k": 50, "top_p": 0.92, "temp": 0.8, "rep_penalty": 2.0, "name": "Custom"},
+        ]
+        
+        model.eval()
+        context_size = model.positional_embeddings.weight.shape[0]
+        encoded = self.text_to_token_ids(start_context).to(device)
+        
+        for config in test_configs:
+            print(f"\n--- {config['name']} Settings ---")
+            print(f"top_k={config['top_k']}, top_p={config['top_p']}, temp={config['temp']}, rep_penalty={config['rep_penalty']}")
+            
+            with torch.no_grad():
+                token_ids = self.generate(
+                    model=model, 
+                    idx=encoded.clone(), 
+                    context_size=context_size, 
+                    top_k=config['top_k'], 
+                    top_p=config['top_p'],
+                    temperature=config['temp'],
+                    max_new_tokens=30,
+                    eos_id=tokenizer.eos_id(),
+                    repetition_penalty=config['rep_penalty']
+                )
+                decoded_text = self.token_ids_to_text(token_ids)
+                print(f"Output: {decoded_text.replace(chr(10), ' ')}")  # Replace newlines with spaces
+        
+        model.train()
+        print("🎯 =====================================")
+            
 
             
     def _generate_and_print_sample(self, model, tokenizer, device, start_context):
@@ -890,7 +1164,7 @@ class Opal:
             raise ValueError(f"Shape mismatch. Left: {left.shape}, Right: {right.shape}")
         return torch.nn.Parameter(torch.tensor(right))
     
-    def calc_loss_batch(self, input_batch, target_batch, model, device):
+    def calc_loss_batch(self, input_batch, target_batch, weights, model, device):
         """
         Compute the loss for a single batch during training.
 
@@ -910,6 +1184,7 @@ class Opal:
         # Move inputs to the correct device
         input_batch = input_batch.to(device)
         target_batch = target_batch.to(device)
+        weights = weights.to(device) if weights is not None else None
 
         # 1️⃣ Forward pass: Let the model compute logits and loss
         # If labels are provided, the model itself computes loss (with ignore_index=-100)
@@ -922,11 +1197,55 @@ class Opal:
             if loss is None:
                 # Fallback if loss not computed in forward()
                 logits = model_output["logits"]
-                loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
-                loss = loss_fct(logits.view(-1, logits.size(-1)), target_batch.view(-1))
+                
+                # ✅ CRITICAL DEBUG: Check logits dimensions before loss computation
+                print(f"🔍 Loss computation debug:")
+                print(f"   Logits shape: {logits.shape}")
+                print(f"   Target shape: {target_batch.shape}")
+                print(f"   Logits vocab dimension: {logits.size(-1)}")
+                print(f"   Expected vocab size: {self.config.get('vocab_size', 'MISSING')}")
+                print(f"   Target range: [{target_batch.min().item()}, {target_batch.max().item()}]")
+                
+                # Check if vocab dimensions match
+                expected_vocab = self.config.get('vocab_size', 12000)
+                actual_vocab = logits.size(-1)
+                B, T, V = logits.size()
+                logits_flat = logits.reshape(B*T, V)
+                labels_flat = target_batch.reshape(B*T)
+                weights_flat = weights.reshape(B*T)
+
+                if actual_vocab != expected_vocab:
+                    print(f"🚨 CRITICAL MISMATCH: Logits vocab={actual_vocab} != expected={expected_vocab}")
+                    print(f"   This indicates model was trained with different vocab size!")
+                    print(f"   🛡️  EMERGENCY: Cannot fix vocab size mismatch at runtime")
+                    raise ValueError(f"Model vocab size mismatch: {actual_vocab} vs {expected_vocab}")
+                
+                #loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+                per_tok = F.cross_entropy(logits_flat, labels_flat, reduction='none', ignore_index=-100)
+                valid = (labels_flat != -100).float()
+                w = torch.where(valid > 0, weights_flat, torch.zeros_like(weights_flat))
+                denom = torch.clamp(w.sum(), min=1.0)
+                loss = (per_tok * w).sum() / denom
+                #loss = loss_fct(logits.view(-1, logits.size(-1)), target_batch.view(-1))
         else:
             # If model returns only logits (legacy behavior)
             logits = model_output
+            
+            # ✅ CRITICAL DEBUG: Check logits dimensions before loss computation  
+            print(f"🔍 Loss computation debug (legacy path):")
+            print(f"   Logits shape: {logits.shape}")
+            print(f"   Target shape: {target_batch.shape}")
+            print(f"   Logits vocab dimension: {logits.size(-1)}")
+            print(f"   Expected vocab size: {self.config.get('vocab_size', 'MISSING')}")
+            print(f"   Target range: [{target_batch.min().item()}, {target_batch.max().item()}]")
+            
+            # Check if vocab dimensions match
+            expected_vocab = self.config.get('vocab_size', 12000)
+            actual_vocab = logits.size(-1)
+            if actual_vocab != expected_vocab:
+                print(f"🚨 CRITICAL MISMATCH: Logits vocab={actual_vocab} != expected={expected_vocab}")
+                raise ValueError(f"Model vocab size mismatch: {actual_vocab} vs {expected_vocab}")
+            
             loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
             loss = loss_fct(logits.view(-1, logits.size(-1)), target_batch.view(-1))
 
@@ -959,9 +1278,18 @@ class Opal:
             # Reduce the number of batches to match the total number of batches in the data loader
             # if num_batches exceeds the number of batches in the data loader
             num_batches = min(num_batches, len(data_loader))
-        for i, (input_batch, target_batch) in enumerate(data_loader):
+        for i, batch in enumerate(data_loader):
             if i < num_batches:
-                loss = self.calc_loss_batch(input_batch, target_batch, model, device)
+                # Handle both 2-value and 3-value returns from dataset
+                if len(batch) == 3:
+                    input_batch, target_batch, weights = batch
+                    # For now, ignore weights in loss calculation during evaluation
+                    loss = self.calc_loss_batch(input_batch, target_batch, None, model, device)
+                elif len(batch) == 2:
+                    input_batch, target_batch = batch
+                    loss = self.calc_loss_batch(input_batch, target_batch, None, model, device)
+                else:
+                    raise ValueError(f"Unexpected batch format: expected 2 or 3 values, got {len(batch)}")
                 total_loss += loss.item()
             else:
                 break
@@ -1106,10 +1434,63 @@ class Opal:
         else:
             print(f"✅ Model loaded from {checkpoint_path}")
             checkpoint = torch.load(os.path.realpath(checkpoint_path), map_location=device)
+            
+            # Display checkpoint training metrics
+            train_losses = checkpoint.get("train_losses", [])
+            val_losses = checkpoint.get("val_losses", [])
+            epoch = checkpoint.get("epoch", 0)
+            
+            if train_losses and val_losses:
+                final_train_loss = train_losses[-1] if train_losses else "N/A"
+                final_val_loss = val_losses[-1] if val_losses else "N/A"
+                
+                # Calculate perplexity from loss (perplexity = exp(loss))
+                train_perplexity = math.exp(final_train_loss) if isinstance(final_train_loss, (int, float)) else "N/A"
+                val_perplexity = math.exp(final_val_loss) if isinstance(final_val_loss, (int, float)) else "N/A"
+                
+                print(f"📊 Checkpoint epoch: {epoch}")
+                print(f"📊 Final training loss: {final_train_loss:.6f}, perplexity: {train_perplexity:.2f}")
+                print(f"📊 Final validation loss: {final_val_loss:.6f}, perplexity: {val_perplexity:.2f}")
+            else:
+                print("📊 No loss history found in checkpoint")
+            
             # Load model with saved config to ensure same architecture
             config = checkpoint["config"]
             model = model_class(config).to(device)
             missing, unexpected = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+            
+            # ✅ CRITICAL DEBUG: Check for vocab size mismatches in loaded model
+            print(f"🔍 CHECKPOINT LOADING DEBUG:")
+            print(f"   Missing keys: {len(missing)} - {missing[:5] if missing else 'None'}")
+            print(f"   Unexpected keys: {len(unexpected)} - {unexpected[:5] if unexpected else 'None'}")
+            
+            # Check if embedding/output layers were properly loaded
+            embedding_loaded = not any('token_embeddings' in key or 'token_emb' in key for key in missing)
+            output_loaded = not any('out_head' in key or 'output' in key for key in missing)
+            
+            print(f"   Token embeddings loaded: {embedding_loaded}")
+            print(f"   Output head loaded: {output_loaded}")
+            
+            if not embedding_loaded:
+                print(f"🚨 CRITICAL: Token embeddings not loaded from checkpoint!")
+                print(f"   This indicates vocab size mismatch between checkpoint and current config")
+            if not output_loaded:
+                print(f"🚨 CRITICAL: Output head not loaded from checkpoint!")
+                print(f"   This indicates vocab size mismatch between checkpoint and current config")
+                
+            # Check actual model dimensions after loading
+            actual_emb_size = model.token_embeddings.num_embeddings if hasattr(model, 'token_embeddings') else 'N/A'
+            actual_out_size = model.out_head.out_features if hasattr(model, 'out_head') else 'N/A'
+            config_vocab = self.config.get('vocab_size', 'N/A')
+            
+            print(f"   After loading - Embedding size: {actual_emb_size}")
+            print(f"   After loading - Output size: {actual_out_size}")
+            print(f"   Config vocab size: {config_vocab}")
+            
+            if actual_emb_size != config_vocab or actual_out_size != config_vocab:
+                print(f"🚨 CONFIRMED VOCAB MISMATCH!")
+                print(f"   This WILL cause CUDA index out of bounds errors!")
+                print(f"   Solution: Train from scratch OR use matching checkpoint")
             print("❌ Missing keys:", missing)
             print("⚠️ Unexpected keys:", unexpected)
             optimizer_state_dict = checkpoint.get("optimizer_state_dict", None)
@@ -1366,6 +1747,9 @@ class Opal:
         # Load Checkpoint if available
         # ----------------------------------------
         # During fine tune we must need the previous checkpoint
+        if self.is_finetune and not os.path.exists(checkpoint_path):
+            print(f"❌ Fine-tuning requires a checkpoint, but {checkpoint_path} not found!")
+            return None
 
         try:
             print(f"Attempting to load model checkpoint from {checkpoint_path}...")
@@ -1381,9 +1765,17 @@ class Opal:
         # ----------------------------------------
         # Optimizer
         # ----------------------------------------
+        print(f"Creating adaptive optimizer with learning rate: {lr}, {self.config.get('learning_rate', 0)}")
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-        if optimizer_state_dict:
+        
+        # 🔧 CRITICAL FIX: For fine-tuning, do NOT load optimizer state to ensure fresh learning rate
+        if optimizer_state_dict and not is_finetune:
+            print("✅ Loading optimizer state from checkpoint (pretraining mode)")
             optimizer.load_state_dict(optimizer_state_dict)
+        elif is_finetune:
+            print("🔧 Fine-tuning mode: Starting with fresh optimizer state (preserving new learning rate)")
+        else:
+            print("✅ No optimizer state to load (training from scratch)")
 
         # ----------------------------------------
         # Data Loading
@@ -1439,19 +1831,23 @@ class Opal:
                     val_file.write(json.dumps(item) + '\n')
                 val_file_path = val_file.name
     
+            # 🚨 CRITICAL FIX: Force safe settings for fine-tuning to prevent CUDA errors
+            safe_num_workers = TRAINING_CONFIG["num_workers"]
+            print(f"🔧 Using {safe_num_workers} workers for {'fine-tuning' if self.is_finetune else 'pretraining'}")
+            
             training_loader = self.createOpalFinetuneDataLoader(
                 data_jsonl=train_file_path,
                 batch_size=batch_size,
                 max_length=config["context_length"],
-                shuffle=False,
-                num_workers=TRAINING_CONFIG["num_workers"]
+                shuffle=True,
+                num_workers=safe_num_workers  # 🚨 Force 0 for fine-tuning
             )
             val_loader = self.createOpalFinetuneDataLoader(
                 data_jsonl=val_file_path,
                 batch_size=batch_size,
                 max_length=config["context_length"],
                 shuffle=False,
-                num_workers=TRAINING_CONFIG["num_workers"]
+                num_workers=safe_num_workers  # 🚨 Force 0 for fine-tuning
             )
     
             # Clean up temporary files after use
@@ -1498,8 +1894,15 @@ class Opal:
         )
 
         print("✅ Created learning rate scheduler")
-        if scheduler_state_dict:
+        
+        # 🔧 CRITICAL FIX: For fine-tuning, do NOT load scheduler state to ensure fresh learning schedule
+        if scheduler_state_dict and not is_finetune:
+            print("✅ Loading scheduler state from checkpoint (pretraining mode)")
             cosine_scheduler.load_state_dict(scheduler_state_dict)
+        elif is_finetune:
+            print("🔧 Fine-tuning mode: Starting with fresh scheduler state (preserving new learning schedule)")
+        else:
+            print("✅ No scheduler state to load (training from scratch)")
 
         # ----------------------------------------
         # Training Loop
