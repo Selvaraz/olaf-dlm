@@ -647,10 +647,10 @@ class Opal:
             
         gradient_accumulation_steps = self.config.get("gradient_accumulation_steps", default_accumulation)
 
-        # 🚨 CRITICAL FIX: Force disable mixed precision for fine-tuning to prevent CUDA errors
-        if self.is_finetune:
-            use_mixed_precision = False
-            print(f"🔧 Mixed precision FORCED OFF for fine-tuning stability")
+        # # 🚨 CRITICAL FIX: Force disable mixed precision for fine-tuning to prevent CUDA errors
+        # if self.is_finetune:
+        #     use_mixed_precision = False
+        #     print(f"🔧 Mixed precision FORCED OFF for fine-tuning stability")
         
         scaler = get_scaler() if use_mixed_precision else None
 
