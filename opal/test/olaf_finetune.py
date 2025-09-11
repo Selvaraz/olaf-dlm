@@ -6,7 +6,7 @@ from ..transformer.OpalGPTModel import OpalGPT
 from ..opalmain.opal_trainer import Opal
 from ..utils.opal_constants import OpalConstants
 from ..utils.training_utils import estimate_training_time_from_config
-from ..config.opal_config import OPAL_MODEL_CONFIG, TRAINING_CONFIG, set_finetune_mode
+from ..config.opal_config import set_finetune_mode
 import time
 import multiprocessing
 import shutil
@@ -21,6 +21,12 @@ if torch.cuda.is_available():
 # Enable fine-tuning mode - this switches to appropriate configs
 print("🔧 Setting fine-tuning mode...")
 set_finetune_mode(enable_finetune=True)
+
+# 🔧 CRITICAL FIX: Import configs AFTER set_finetune_mode() to get updated values
+from ..config.opal_config import OPAL_MODEL_CONFIG, TRAINING_CONFIG
+print(f"✅ Configs imported after fine-tuning mode set")
+print(f"   → Learning rate: {OPAL_MODEL_CONFIG['learning_rate']}")
+print(f"   → Batch size: {TRAINING_CONFIG['batch_size']}")
 
 # Load SentencePiece tokenizer
 print(f"🔧 Loading tokenizer from: {OpalConstants.TOKENIZER_MODEL_PATH}")
