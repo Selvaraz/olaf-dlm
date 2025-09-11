@@ -46,6 +46,10 @@ class OpalFinetuneDataset(Dataset):
                 print(f"⚠ Skipping too short prompt: {prompt[:50]}...")
                 continue
             
+            if len(response_text) < 1:
+                print(f"⚠ Skipping empty response for prompt: {prompt[:50]}...")
+                continue
+            
             # Build the complete conversation format
             full_text = f"<USER>{prompt}<ASSISTANT>{response_text}"
             prompt_text = f"<USER>{prompt}<ASSISTANT>"
@@ -58,10 +62,13 @@ class OpalFinetuneDataset(Dataset):
             bos_id = self.tokenizer.bos_id() if hasattr(self.tokenizer, 'bos_id') and self.tokenizer.bos_id() >= 0 else None
             eos_id = self.tokenizer.eos_id() if hasattr(self.tokenizer, 'eos_id') and self.tokenizer.eos_id() >= 0 else None
             
+            # Track the original prompt length before any modifications
+            original_prompt_len = len(prompt_ids)
+            
             # Check if we need to manually add BOS (if tokenizer doesn't add it automatically)
             if bos_id is not None and (not full_text_ids or full_text_ids[0] != bos_id):
                 full_text_ids.insert(0, bos_id)
-                prompt_ids.insert(0, bos_id)
+                original_prompt_len += 1  # Account for added BOS in prompt length
             
             # Check if we need to manually add EOS (if tokenizer doesn't add it automatically)  
             if eos_id is not None and (not full_text_ids or full_text_ids[-1] != eos_id):
@@ -70,17 +77,20 @@ class OpalFinetuneDataset(Dataset):
             # Truncation: Keep sequences within max_length
             if len(full_text_ids) > self.max_length:
                 full_text_ids = full_text_ids[:self.max_length]
-                # Recalculate prompt_ids length after potential truncation
-                if len(prompt_ids) > self.max_length:
-                    prompt_ids = prompt_ids[:self.max_length]
             
-            # Calculate prompt length for masking
-            prompt_len = len(prompt_ids)
+            # Use the tracked prompt length for proper masking
+            prompt_len = min(original_prompt_len, len(full_text_ids))  # Don't exceed actual sequence length
             
             # Create labels: mask prompt tokens (-100), keep response tokens
             labels = full_text_ids.copy()  # Start with all tokens
             for i in range(min(prompt_len, len(labels))):
                 labels[i] = -100  # Mask prompt tokens
+            
+            # Validate that we have some response tokens to learn from
+            response_token_count = (torch.tensor(labels) != -100).sum().item()
+            if response_token_count < 1:
+                print(f"⚠ Skipping sample with no response tokens after truncation: {prompt[:50]}...")
+                continue
             
             # Convert to tensors - NO PADDING (handled by collate_fn)
             samples.append((
