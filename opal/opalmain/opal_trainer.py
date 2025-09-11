@@ -90,10 +90,23 @@ class Opal:
 
         # CRITICAL: Final validation to prevent CUDA errors
         max_input_token = padded_inputs.max().item()
-        if max_input_token >= vocab_size:
-            print(f"🚨 CRITICAL: Final batch contains token {max_input_token} >= vocab_size {vocab_size}")
-            print(f"   → Clipping out-of-bounds tokens to prevent crash")
+        min_input_token = padded_inputs.min().item()
+        
+        if min_input_token < 0 or max_input_token >= vocab_size:
+            print(f"🚨 CRITICAL: Final batch contains invalid tokens!")
+            print(f"   Token range: [{min_input_token}, {max_input_token}]")
+            print(f"   Vocab size: {vocab_size}")
+            print(f"   Batch shape: {padded_inputs.shape}")
+            print(f"   Out-of-bounds count: {(padded_inputs >= vocab_size).sum().item()}")
+            print(f"   Negative count: {(padded_inputs < 0).sum().item()}")
+            print(f"   🛡️  EMERGENCY FIX: Clamping all tokens to [0, {vocab_size-1}]")
+            
+            # Emergency clamp ALL tokens
             padded_inputs = torch.clamp(padded_inputs, 0, vocab_size - 1)
+            
+            # Also clamp labels (but preserve -100)
+            label_mask = padded_labels != -100
+            padded_labels[label_mask] = torch.clamp(padded_labels[label_mask], 0, vocab_size - 1)
 
         return padded_inputs, padded_labels
 

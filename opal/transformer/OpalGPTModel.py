@@ -78,6 +78,25 @@ class OpalGPT(nn.Module):
         # Get the batch size and sequence length from the input token IDs
         batch_size, seq_len = input_token_ids.shape
         
+        # ✅ CRITICAL FIX: Add bounds checking to prevent CUDA index out of bounds
+        vocab_size = self.cfg["vocab_size"]
+        
+        # Check for any out-of-bounds token IDs
+        min_token = input_token_ids.min().item()
+        max_token = input_token_ids.max().item()
+        
+        if min_token < 0 or max_token >= vocab_size:
+            print(f"🚨 CUDA BOUNDS ERROR DETECTED IN MODEL FORWARD!")
+            print(f"   Token range: [{min_token}, {max_token}]")
+            print(f"   Vocab size: {vocab_size}")
+            print(f"   Input shape: {input_token_ids.shape}")
+            print(f"   Out-of-bounds tokens: {(input_token_ids >= vocab_size).sum().item()}")
+            print(f"   Negative tokens: {(input_token_ids < 0).sum().item()}")
+            
+            # Emergency fix: Clamp tokens to valid range
+            print(f"   🛡️  EMERGENCY FIX: Clamping tokens to [0, {vocab_size-1}]")
+            input_token_ids = torch.clamp(input_token_ids, 0, vocab_size - 1)
+        
         # Get the token embeddings for the input token IDs
         #print("Input token IDs shape:", input_token_ids.shape)
         #print("Token embeddings shape:", self.cfg["vocab_size"], self.cfg["emb_dim"])
