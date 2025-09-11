@@ -236,6 +236,12 @@ if __name__ == "__main__":
     # Parse command line arguments
     args = parse_arguments()
     
+    # Show current config before any overrides
+    print(f"\n📊 CURRENT CONFIG BEFORE OVERRIDES:")
+    print(f"   → Learning rate: {OPAL_MODEL_CONFIG['learning_rate']}")
+    print(f"   → Batch size: {TRAINING_CONFIG['batch_size']}")
+    print(f"   → Epochs: {OPAL_MODEL_CONFIG['num_epoch']}")
+    
     # Override configs if specified
     if args.epochs:
         OPAL_MODEL_CONFIG["num_epoch"] = args.epochs
@@ -248,6 +254,8 @@ if __name__ == "__main__":
     if args.lr:
         OPAL_MODEL_CONFIG["learning_rate"] = args.lr
         print(f"🔧 Override learning rate: {args.lr}")
+    else:
+        print(f"🔧 Using config learning rate: {OPAL_MODEL_CONFIG['learning_rate']}")
     
     # Print startup information
     print(f"🏃 Running on device: {device}")

@@ -2002,7 +2002,7 @@ class Opal:
         # ----------------------------------------
         # Optimizer
         # ----------------------------------------
-        print(f"Creating adaptive optimizer with learning rate: {lr}")
+        print(f"Creating adaptive optimizer with learning rate: {lr}, {self.config.get('learning_rate', 0)}")
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         if optimizer_state_dict:
             optimizer.load_state_dict(optimizer_state_dict)
