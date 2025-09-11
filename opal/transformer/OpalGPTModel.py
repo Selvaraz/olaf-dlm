@@ -185,9 +185,6 @@ class OpalGPT(nn.Module):
             
             if len(valid_labels) > 0:
                 labels_min, labels_max = valid_labels.min().item(), valid_labels.max().item()
-                print(f"🔍 Loss calculation bounds check:")
-                print(f"   Labels range: [{labels_min}, {labels_max}] (must be < {vocab_size})")
-                print(f"   Valid labels count: {len(valid_labels)}")
                 
                 if labels_max >= vocab_size or labels_min < 0:
                     print(f"🚨 CRITICAL: Labels out of bounds in loss calculation!")
