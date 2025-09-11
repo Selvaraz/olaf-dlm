@@ -17,6 +17,120 @@ class OpalFinetuneDataset(Dataset):
         self.device = TRAINING_CONFIG["device"]
 
         self.samples = self._prepare_data()
+        
+        # Check for potential tokenization issues
+        self._validate_tokenization()
+
+    def _validate_tokenization(self):
+        """Check for common tokenization issues that could cause repetitive generation."""
+        if not self.samples:
+            return
+            
+        unk_id = self.tokenizer.unk_id() if hasattr(self.tokenizer, 'unk_id') else -1
+        total_tokens = 0
+        unk_tokens = 0
+        
+        for sample in self.samples[:min(100, len(self.samples))]:  # Check first 100 samples
+            input_ids = sample["input_ids"]
+            total_tokens += len(input_ids)
+            if unk_id >= 0:
+                unk_tokens += (input_ids == unk_id).sum().item()
+        
+        if total_tokens > 0:
+            unk_percentage = (unk_tokens / total_tokens) * 100
+            print(f"   → Unknown token rate: {unk_percentage:.2f}% ({unk_tokens}/{total_tokens})")
+            
+            if unk_percentage > 5.0:
+                print(f"   ⚠️ WARNING: High unknown token rate! This could cause repetitive generation.")
+                print(f"      Consider using a tokenizer trained on similar data.")
+            elif unk_percentage > 10.0:
+                print(f"   🚨 CRITICAL: Very high unknown token rate! This will likely cause poor generation quality.")
+
+    def _json_to_natural_format(self, json_obj):
+        """
+        Convert JSON response to a more natural language format that's better for fine-tuning.
+        This reduces repetitive JSON syntax and makes responses more human-readable.
+        """
+        if isinstance(json_obj, dict):
+            if "action" in json_obj and json_obj["action"] == "orbit.troubleshoot":
+                return self._format_troubleshoot_response(json_obj)
+            else:
+                # Generic JSON to natural language conversion
+                return self._generic_json_to_text(json_obj)
+        else:
+            return str(json_obj)
+    
+    def _format_troubleshoot_response(self, response):
+        """Format orbit.troubleshoot responses in a natural way."""
+        output = []
+        
+        # Start with action
+        output.append(f"Action: {response.get('action', 'unknown')}")
+        
+        # Process execution steps
+        execution = response.get("execution", {})
+        steps = execution.get("steps", [])
+        
+        if steps:
+            output.append("Execution Steps:")
+            
+            for i, step in enumerate(steps, 1):
+                step_type = step.get("step_type", "unknown")
+                descriptions = step.get("description", [])
+                commands = step.get("commands", [])
+                
+                # Format step header
+                if step_type == "step_explain":
+                    output.append(f"Step {i} - Explanation:")
+                elif step_type == "step_conf":
+                    output.append(f"Step {i} - Configuration:")
+                elif step_type == "step_exec":
+                    output.append(f"Step {i} - Execution:")
+                else:
+                    output.append(f"Step {i} - {step_type}:")
+                
+                # Add descriptions
+                if descriptions:
+                    for desc in descriptions:
+                        output.append(f"  - {desc}")
+                
+                # Add commands
+                if commands:
+                    output.append("  Commands:")
+                    for cmd in commands:
+                        output.append(f"    {cmd}")
+        
+        result = "\n".join(output)
+        
+        # Limit length to prevent overly long responses
+        if len(result) > 600:
+            result = result[:600] + "\n  [Response truncated for training efficiency]"
+        
+        return result
+    
+    def _generic_json_to_text(self, obj, indent=0):
+        """Convert generic JSON to more natural text format."""
+        lines = []
+        prefix = "  " * indent
+        
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if isinstance(value, (dict, list)) and value:
+                    lines.append(f"{prefix}{key}:")
+                    lines.append(self._generic_json_to_text(value, indent + 1))
+                else:
+                    lines.append(f"{prefix}{key}: {value}")
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                if isinstance(item, (dict, list)):
+                    lines.append(f"{prefix}Item {i+1}:")
+                    lines.append(self._generic_json_to_text(item, indent + 1))
+                else:
+                    lines.append(f"{prefix}- {item}")
+        else:
+            lines.append(f"{prefix}{obj}")
+        
+        return "\n".join(lines)
 
     def _prepare_data(self):
         samples = []
@@ -25,26 +139,47 @@ class OpalFinetuneDataset(Dataset):
                 raise ValueError(f"Invalid JSONL sample format: {item}")
 
             prompt = item["prompt"].strip()
-            # Convert entire response object to a compact JSON string
+            # Convert entire response object to a more natural format
             if isinstance(item["response"], str):
                 response_text = item["response"].strip()
             else:
-                response_text = json.dumps(item["response"], ensure_ascii=False).strip()
+                # Convert JSON to natural language format instead of raw JSON
+                response_text = self._json_to_natural_format(item["response"])
 
             # Validate minimum length
             if len(prompt) < 5:
                 print(f"⚠ Skipping too short prompt: {prompt[:50]}...")
                 continue
 
-            full_text = f"<BOS> {prompt} {response_text} <EOS>"
-            #full_text = prompt.strip() + " " + response_text.strip()
-
+            # Since <BOS> and <EOS> are not in tokenizer vocabulary, use the built-in special tokens
+            bos_token = self.tokenizer.bos_id() if hasattr(self.tokenizer, 'bos_id') and self.tokenizer.bos_id() >= 0 else None
+            eos_token = self.tokenizer.eos_id() if hasattr(self.tokenizer, 'eos_id') and self.tokenizer.eos_id() >= 0 else None
+            
+            # Add clear separators to help the model distinguish prompt from response
+            # Use tokens that are likely in the vocabulary
+            prompt_marker = "PROMPT:"
+            response_marker = "RESPONSE:"
+            
+            # Build the full sequence with clear structure
+            full_text = f"{prompt_marker} {prompt} {response_marker} {response_text}"
+            
+            # Encode the full text
             input_ids = self.tokenizer.encode(full_text, out_type=int)
-            #print("OpalFineTuneDataset: Input token IDs min:", min(input_ids), "max:", max(input_ids))
-            #print("UNK ID:", self.tokenizer.pad_id())
-
-            # Mask prompt tokens so loss is applied only on response
-            prompt_ids = self.tokenizer.encode(f"<BOS> {prompt}", out_type=int)
+            
+            # Add BOS token at the beginning if available
+            if bos_token is not None:
+                input_ids = [bos_token] + input_ids
+            
+            # Add EOS token at the end if available
+            if eos_token is not None:
+                input_ids = input_ids + [eos_token]
+            
+            # Encode the prompt part with marker to determine masking boundary more accurately
+            prompt_with_marker = f"{prompt_marker} {prompt} {response_marker}"
+            prompt_ids = self.tokenizer.encode(prompt_with_marker, out_type=int)
+            if bos_token is not None:
+                prompt_ids = [bos_token] + prompt_ids
+                
             # Truncate if too long
             if len(input_ids) > self.max_length:
                 input_ids = input_ids[:self.max_length]
@@ -59,6 +194,18 @@ class OpalFinetuneDataset(Dataset):
             if len(labels) > self.max_length:
                 labels = labels[:self.max_length]
 
+            # Debug: Print first few samples to verify format
+            if len(samples) < 3:  # Only for first few samples
+                print(f"   → Sample {len(samples) + 1} debug:")
+                print(f"     Prompt: {prompt[:100]}...")
+                print(f"     Response length: {len(response_text)} chars")
+                print(f"     Full text: {full_text[:150]}...")
+                print(f"     Input IDs length: {len(input_ids)}, Prompt boundary: {prompt_len}")
+                
+                # Check if response_text is properly structured JSON
+                if isinstance(item["response"], dict):
+                    print(f"     JSON keys: {list(item['response'].keys())}")
+
             samples.append({
                 "input_ids": torch.tensor(input_ids, dtype=torch.long),
                 "labels": torch.tensor(labels, dtype=torch.long)
@@ -69,6 +216,17 @@ class OpalFinetuneDataset(Dataset):
             avg_input_len = sum(len(s["input_ids"]) for s in samples) / len(samples)
             avg_label_len = sum((s["labels"] != -100).sum().item() for s in samples) / len(samples)
             print(f"   → Avg input length: {avg_input_len:.1f}, Avg response length: {avg_label_len:.1f}")
+            
+            # Debug: Check if BOS/EOS tokens are properly used
+            sample_input = samples[0]["input_ids"]
+            sample_labels = samples[0]["labels"]
+            bos_token = self.tokenizer.bos_id() if hasattr(self.tokenizer, 'bos_id') and self.tokenizer.bos_id() >= 0 else None
+            eos_token = self.tokenizer.eos_id() if hasattr(self.tokenizer, 'eos_id') and self.tokenizer.eos_id() >= 0 else None
+            
+            print(f"   → BOS token ID: {bos_token}, EOS token ID: {eos_token}")
+            print(f"   → Sample input first 5 tokens: {sample_input[:5].tolist()}")
+            print(f"   → Sample input last 5 tokens: {sample_input[-5:].tolist()}")
+            print(f"   → Sample labels (non-masked): {(sample_labels != -100).sum().item()}/{len(sample_labels)}")
 
         return samples
 
@@ -77,3 +235,78 @@ class OpalFinetuneDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.samples[idx]["input_ids"], self.samples[idx]["labels"]
+
+
+"""
+=== EXAMPLE: JSONL TO TRAINING FORMAT CONVERSION ===
+
+Given a single JSONL entry like this:
+{
+    "prompt": "How do I configure OSPF on a Cisco router?",
+    "response": {
+        "action": "orbit.troubleshoot",
+        "execution": {
+            "steps": [
+                {
+                    "step_type": "step_conf",
+                    "description": ["Enable OSPF routing protocol"],
+                    "commands": ["router ospf 1"]
+                },
+                {
+                    "step_type": "step_conf", 
+                    "description": ["Configure network statement"],
+                    "commands": ["network 192.168.1.0 0.0.0.255 area 0"]
+                }
+            ]
+        }
+    }
+}
+
+This dataset converts it to the following training format:
+
+1. NATURAL LANGUAGE CONVERSION:
+   The JSON response gets converted to human-readable format:
+   
+   "Action: orbit.troubleshoot
+   Execution Steps:
+   Step 1 - Configuration:
+     - Enable OSPF routing protocol
+     Commands:
+       router ospf 1
+   Step 2 - Configuration:
+     - Configure network statement
+     Commands:
+       network 192.168.1.0 0.0.0.255 area 0"
+
+2. TRAINING SEQUENCE STRUCTURE:
+   The final training sequence becomes:
+   
+   Input Text: "PROMPT: How do I configure OSPF on a Cisco router? RESPONSE: Action: orbit.troubleshoot..."
+   
+   Tokenized as:
+   - BOS token (if available)
+   - PROMPT: How do I configure OSPF on a Cisco router? RESPONSE: [MASKED - labels = -100]
+   - Action: orbit.troubleshoot... [NOT MASKED - labels = actual token IDs]
+   - EOS token (if available)
+
+3. MASKING STRATEGY:
+   - Everything up to and including "RESPONSE:" marker is MASKED (labels = -100)
+   - Only the actual response content is used for loss calculation
+   - This teaches the model to generate responses, not prompts
+
+4. TOKEN STRUCTURE:
+   input_ids = [BOS, tok1, tok2, ..., tokN, EOS]  # Full sequence
+   labels    = [-100, -100, -100, ..., tokX, tokY, tokZ, EOS]  # Only response tokens
+   
+   Where:
+   - Prompt tokens (tok1...tokN-X) are masked with -100
+   - Response tokens (tokX...tokZ) have actual token IDs for training
+   - Model learns to predict the response given the prompt context
+
+This format ensures:
+✅ Clean separation between prompt and response
+✅ Model only trains on generating responses, not repeating prompts  
+✅ Natural language format reduces JSON syntax repetition
+✅ Clear structure helps model understand instruction-following pattern
+✅ Proper masking prevents the model from learning to repeat inputs
+"""

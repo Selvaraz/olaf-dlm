@@ -11,7 +11,6 @@ import time
 import os
 import shutil
 import psutil
-import git
 import tempfile
 import atexit
 from opal.dataloader.OpalFileDataSet import OpalFileDataset
@@ -384,9 +383,33 @@ class Opal:
             logits = model_output["logits"] if isinstance(model_output, dict) else model_output
             logits = logits[:, -1, :]  # ✅ Take only last token logits
 
-            #logits = model_output["logits"][0, -1, :]  # Take logits of the last token position
-            for token in set(idx[0].tolist()):
-                logits[:, token] /= repetition_penalty
+            # Improved repetition penalty - penalize recently repeated tokens more heavily
+            if repetition_penalty > 1.0:
+                # Get the last 20 tokens for more focused repetition penalty
+                recent_tokens = idx[0, -min(20, idx.shape[1]):].tolist()
+                token_counts = {}
+                
+                # Count occurrences of each token in recent history
+                for i, token in enumerate(recent_tokens):
+                    if token not in token_counts:
+                        token_counts[token] = []
+                    token_counts[token].append(i)
+                
+                # Apply stronger penalty for more frequent and recent tokens
+                for token, positions in token_counts.items():
+                    if len(positions) > 1:  # Only penalize if token appears multiple times
+                        # Stronger penalty for more frequent tokens
+                        frequency_penalty = repetition_penalty ** len(positions)
+                        # Additional penalty for very recent repetitions
+                        most_recent_pos = max(positions)
+                        if most_recent_pos >= len(recent_tokens) - 3:  # Last 3 tokens
+                            frequency_penalty *= 1.5
+                        
+                        # Apply the penalty
+                        if logits[0, token] > 0:
+                            logits[0, token] /= frequency_penalty
+                        else:
+                            logits[0, token] *= frequency_penalty
 
             #  Apply temperature scaling (makes probabilities sharper or smoother)
             if temperature > 0.0:
@@ -502,7 +525,14 @@ class Opal:
         # FINETUNE_PH2: Get configuration values for both pretraining and fine-tuning
         use_mixed_precision = TRAINING_CONFIG.get("mixed_precision", False)
         max_grad_norm = self.config.get("max_grad_norm", 1.0)
-        gradient_accumulation_steps = self.config.get("gradient_accumulation_steps", 4)
+        
+        # Adaptive gradient accumulation: higher for fine-tuning complex data
+        if self.is_finetune:
+            default_accumulation = 8  # Higher for fine-tuning with complex JSON
+        else:
+            default_accumulation = 4  # Standard for pretraining
+            
+        gradient_accumulation_steps = self.config.get("gradient_accumulation_steps", default_accumulation)
 
         scaler = get_scaler() if use_mixed_precision else None
 
@@ -777,9 +807,19 @@ class Opal:
             #     model, tokenizer, device, start_context
             # )
 
-            self.generate_with_topk(
-                model, tokenizer, device, start_context, top_k=50
-            )
+            if self.is_finetune:
+                self.generate_for_finetune(
+                    model, tokenizer, device, start_context
+                )
+                # Every few epochs, test generation diversity
+                if (epoch + 1) % 3 == 0:  # Every 3rd epoch
+                    self.improve_generation_diversity(
+                        model, tokenizer, device, start_context
+                    )
+            else:
+                self.generate_with_topk(
+                    model, tokenizer, device, start_context, top_k=50
+                )
 
         print(f"\n🎉 === TRAINING COMPLETED SUCCESSFULLY ===")
         print(f"🎉 All {num_epochs} epochs completed!")
@@ -901,10 +941,11 @@ class Opal:
             token_ids = self.generate(model=model, idx=encoded, 
                                       context_size=context_size, 
                                       top_k=top_k, 
-                                      temperature=1.2,
+                                      top_p=0.9,  # Add nucleus sampling for better diversity
+                                      temperature=1.0,  # Reduce temperature for more focused generation
                                       max_new_tokens=50,
                                       eos_id=tokenizer.eos_id(),
-                                      repetition_penalty=1.2)
+                                      repetition_penalty=2.5)  # Increase repetition penalty
             decoded_text = self.token_ids_to_text(token_ids)
             print("\n")
             print("==========================================")
@@ -912,6 +953,162 @@ class Opal:
             print("==========================================")
             print("\n")
         model.train()
+
+    def generate_for_finetune(self, model, tokenizer, device, start_context):
+        """
+        Specialized generation method for fine-tuning with more conservative settings
+        to avoid repetitive outputs.
+        """
+        model.eval()
+        context_size = model.positional_embeddings.weight.shape[0]
+        encoded = self.text_to_token_ids(start_context).to(device)
+        with torch.no_grad():
+            token_ids = self.generate(model=model, idx=encoded, 
+                                      context_size=context_size, 
+                                      top_k=30,  # More focused top-k
+                                      top_p=0.85,  # Slightly more conservative nucleus sampling
+                                      temperature=0.8,  # Lower temperature for more deterministic output
+                                      max_new_tokens=40,  # Slightly fewer tokens
+                                      eos_id=tokenizer.eos_id(),
+                                      repetition_penalty=3.0)  # Strong repetition penalty
+            decoded_text = self.token_ids_to_text(token_ids)
+            print("\n")
+            print("========== FINE-TUNE GENERATION ==========")
+            print(decoded_text.replace("\n", " "))  # Compact print format
+            print("===========================================")
+            print("\n")
+        model.train()
+
+    def analyze_finetune_data_quality(self, jsonl_file, sample_size=5):
+        """
+        Analyze fine-tuning data for potential issues that could cause repetitive generation.
+        """
+        print("🔍 === ANALYZING FINE-TUNING DATA QUALITY ===")
+        
+        with open(jsonl_file, "r") as f:
+            lines = f.readlines()
+            
+        print(f"📊 Total examples: {len(lines)}")
+        
+        # Sample some examples for analysis
+        sample_lines = lines[:sample_size] if len(lines) >= sample_size else lines
+        
+        # Track statistics
+        total_prompt_len = 0
+        total_response_len = 0
+        json_responses = 0
+        str_responses = 0
+        complex_structures = 0
+        
+        for i, line in enumerate(sample_lines):
+            item = json.loads(line)
+            prompt = item.get("prompt", "")
+            response = item.get("response", "")
+            
+            total_prompt_len += len(prompt)
+            
+            # Analyze response structure
+            if isinstance(response, str):
+                str_responses += 1
+                response_text = response
+                total_response_len += len(response_text)
+            else:
+                json_responses += 1
+                response_text = json.dumps(response, ensure_ascii=False, separators=(',', ':'))
+                total_response_len += len(response_text)
+                
+                # Check for complex nested structures
+                def count_nesting(obj, level=0):
+                    if isinstance(obj, dict):
+                        return max(count_nesting(v, level + 1) for v in obj.values()) if obj else level
+                    elif isinstance(obj, list):
+                        return max(count_nesting(item, level + 1) for item in obj) if obj else level
+                    return level
+                
+                nesting = count_nesting(response)
+                if nesting > 3:
+                    complex_structures += 1
+            
+            print(f"\n--- Example {i+1} ---")
+            print(f"Prompt length: {len(prompt)} chars")
+            print(f"Response type: {'JSON' if isinstance(response, dict) else 'String'}")
+            print(f"Response length: {len(response_text)} chars")
+            print(f"Prompt: {prompt[:100]}..." if len(prompt) > 100 else f"Prompt: {prompt}")
+            print(f"Response: {response_text[:100]}..." if len(response_text) > 100 else f"Response: {response_text}")
+            
+            # Check for repetitive patterns
+            response_words = response_text.split()
+            word_counts = {}
+            for word in response_words:
+                word_counts[word] = word_counts.get(word, 0) + 1
+            
+            repeated_words = {word: count for word, count in word_counts.items() if count > 3}
+            if repeated_words:
+                print(f"⚠️ Repeated words in response: {repeated_words}")
+        
+        # Print summary statistics
+        print(f"\n� === DATASET SUMMARY ===")
+        print(f"Average prompt length: {total_prompt_len / len(sample_lines):.1f} chars")
+        print(f"Average response length: {total_response_len / len(sample_lines):.1f} chars")
+        print(f"String responses: {str_responses}/{len(sample_lines)}")
+        print(f"JSON responses: {json_responses}/{len(sample_lines)}")
+        print(f"Complex nested structures: {complex_structures}/{json_responses if json_responses > 0 else 1}")
+        
+        if complex_structures > 0:
+            print("⚠️ WARNING: Complex JSON structures detected. Consider simplifying or using structured tokens.")
+        
+        if total_response_len / len(sample_lines) > 500:
+            print("⚠️ WARNING: Very long responses detected. Consider truncating or chunking.")
+            
+        print("�🔍 ==========================================")
+        
+        return {
+            "avg_prompt_len": total_prompt_len / len(sample_lines),
+            "avg_response_len": total_response_len / len(sample_lines),
+            "json_responses": json_responses,
+            "str_responses": str_responses,
+            "complex_structures": complex_structures
+        }
+
+    def improve_generation_diversity(self, model, tokenizer, device, start_context, num_samples=3):
+        """
+        Generate multiple samples with different settings to test diversity.
+        """
+        print("🎯 === TESTING GENERATION DIVERSITY ===")
+        
+        # Test different parameter combinations
+        test_configs = [
+            {"top_k": 25, "top_p": 0.8, "temp": 0.7, "rep_penalty": 3.5, "name": "Conservative"},
+            {"top_k": 40, "top_p": 0.9, "temp": 1.0, "rep_penalty": 2.5, "name": "Balanced"},
+            {"top_k": 60, "top_p": 0.95, "temp": 1.2, "rep_penalty": 2.0, "name": "Creative"},
+        ]
+        
+        model.eval()
+        context_size = model.positional_embeddings.weight.shape[0]
+        encoded = self.text_to_token_ids(start_context).to(device)
+        
+        for config in test_configs:
+            print(f"\n--- {config['name']} Settings ---")
+            print(f"top_k={config['top_k']}, top_p={config['top_p']}, temp={config['temp']}, rep_penalty={config['rep_penalty']}")
+            
+            with torch.no_grad():
+                token_ids = self.generate(
+                    model=model, 
+                    idx=encoded.clone(), 
+                    context_size=context_size, 
+                    top_k=config['top_k'], 
+                    top_p=config['top_p'],
+                    temperature=config['temp'],
+                    max_new_tokens=30,
+                    eos_id=tokenizer.eos_id(),
+                    repetition_penalty=config['rep_penalty']
+                )
+                decoded_text = self.token_ids_to_text(token_ids)
+                print(f"Output: {decoded_text.replace(chr(10), ' ')}")  # Replace newlines with spaces
+        
+        model.train()
+        print("🎯 =====================================")
+            
 
             
     def _generate_and_print_sample(self, model, tokenizer, device, start_context):

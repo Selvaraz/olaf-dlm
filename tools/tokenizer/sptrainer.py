@@ -20,6 +20,12 @@ def train_tokenizer(
     output_dir: Path = Path("."),
     show_progress: bool = True,
     finetune_symbols = sorted([
+        # --- Special Sequence Tokens ---
+        # "<BOS>",  # Beginning of sequence
+        # "<EOS>",  # End of sequence
+        # "<PAD>",  # Padding token
+        # "<UNK>",  # Unknown token
+        
         # --- JSON Keywords & Structural Tags (from previous conversation) ---
         "\"prompt\":", 
         "\"response\":", 
