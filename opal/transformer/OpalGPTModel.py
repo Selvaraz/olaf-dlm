@@ -115,6 +115,21 @@ class OpalGPT(nn.Module):
             # Recompute embeddings with truncated input
             tok_embeds = self.token_embeddings(input_token_ids)
         
+        # ✅ ADDITIONAL DEBUGGING: Check positional embedding bounds
+        print(f"🔍 Positional embedding check:")
+        print(f"   seq_len: {seq_len}, context_length: {context_length}")
+        print(f"   pos_emb vocab size: {self.positional_embeddings.num_embeddings}")
+        
+        if seq_len > self.positional_embeddings.num_embeddings:
+            print(f"🚨 CRITICAL: seq_len {seq_len} > pos_emb size {self.positional_embeddings.num_embeddings}")
+            print(f"   This will cause positional embedding index out of bounds!")
+            # Emergency fix: truncate to max positional embedding size
+            max_pos_len = self.positional_embeddings.num_embeddings
+            input_token_ids = input_token_ids[:, :max_pos_len]
+            seq_len = max_pos_len
+            tok_embeds = self.token_embeddings(input_token_ids)
+            print(f"   🛡️  EMERGENCY TRUNCATE: Limited to {max_pos_len}")
+        
         pos_embeds = self.positional_embeddings(
             torch.arange(seq_len, device=input_token_ids.device)
         )
@@ -125,6 +140,11 @@ class OpalGPT(nn.Module):
         # Apply dropout to the embeddings
         x = self.drop_embeddings(x)
         
+        # ✅ DEBUGGING: Check tensor shapes before transformer blocks
+        print(f"🔍 Before transformer blocks:")
+        print(f"   x.shape: {x.shape}")
+        print(f"   Expected: [batch_size={batch_size}, seq_len={seq_len}, emb_dim={self.cfg['emb_dim']}]")
+        
         # cache: normalize past_key_values length and structure
         if past_key_values is None:
             past_key_values = [(None, None)] * len(self.transformers_block)
@@ -132,11 +152,26 @@ class OpalGPT(nn.Module):
         # Pass the embeddings through the transformer blocks
         # cache: we need to loop blocks to pass per-layer caches in/out (can't call nn.Sequential directly).
         present_key_values = [] if use_cache else None
-        for i, block in enumerate(self.transformers_block):
-            pk, pv = past_key_values[i]
-            x, pk_new, pv_new = block(x, past_key=pk, past_value=pv, use_cache=use_cache)
-            if use_cache:
-                present_key_values.append((pk_new, pv_new))
+        
+        try:
+            for i, block in enumerate(self.transformers_block):
+                print(f"🔍 Processing transformer block {i+1}/{len(self.transformers_block)}")
+                print(f"   Input shape: {x.shape}")
+                
+                pk, pv = past_key_values[i]
+                x, pk_new, pv_new = block(x, past_key=pk, past_value=pv, use_cache=use_cache)
+                
+                print(f"   Output shape: {x.shape}")
+                
+                if use_cache:
+                    present_key_values.append((pk_new, pv_new))
+                    
+        except Exception as e:
+            print(f"🚨 CRITICAL: Error in transformer block {i+1}")
+            print(f"   Error: {e}")
+            print(f"   Input shape: {x.shape}")
+            print(f"   Block index: {i}")
+            raise
         
         # Apply layer normalization to the output of the transformer blocks
         x = self.final_norm(x)

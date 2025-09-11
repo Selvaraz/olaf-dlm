@@ -2,8 +2,9 @@ import os
 import torch
 import psutil 
 
-def get_device():
-    if torch.cuda.is_available():
+def get_device():    "kv_heads" : 1,                # MQA
+    "use_rope": False,             # TEMPORARILY DISABLE RoPE to test CUDA fix  
+    "tie_embeddings": True         # Tie input/output embeddings  if torch.cuda.is_available():
         return "cuda"
     elif torch.backends.mps.is_available():
         return "mps"
@@ -77,7 +78,7 @@ _GPT_CONFIG_OPAL_45M = {
     "gradient_accumulation_steps": 1,  # ✅ Add explicitly
     "max_grad_norm": 1.0,               # ✅ Add gradient clipping
     "kv_heads" : 1,                # MQA
-    "use_rope": True,              # Rotary pos embeddings
+    "use_rope": False,             # TEMPORARILY DISABLE RoPE to test CUDA fix
     "tie_embeddings": True,        # Tie input/output embeddings
     # ✅ FIX: Add special token IDs to prevent CUDA index out of bounds (matches sptrainer.py)
     "pad_id": 0,                   # Safe padding token
@@ -195,5 +196,5 @@ OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_FINETUNE_45M
 for _cfg_name, _cfg in list(globals().items()):
     if isinstance(_cfg, dict) and _cfg.get("vocab_size") and _cfg.get("emb_dim"):
         _cfg.setdefault("kv_heads", 1)         # MQA
-        _cfg.setdefault("use_rope", True)      # Rotary pos embeddings
+        _cfg.setdefault("use_rope", False)     # DISABLE RoPE for CUDA testing
         _cfg.setdefault("tie_embeddings", True)

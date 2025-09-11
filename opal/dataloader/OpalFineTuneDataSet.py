@@ -179,26 +179,51 @@ class OpalFinetuneDataset(Dataset):
             max_token_id = max(input_ids) if input_ids else -1
             min_token_id = min(input_ids) if input_ids else -1
             
-            if max_token_id >= vocab_size:
-                print(f"🚨 CRITICAL ERROR: Token ID {max_token_id} >= vocab_size {vocab_size}")
+            # FIX: Actually clamp the out-of-bounds tokens instead of skipping
+            if max_token_id >= vocab_size or min_token_id < 0:
+                print(f"🚨 FIXING out-of-bounds tokens in sample:")
+                print(f"   Token range: [{min_token_id}, {max_token_id}], vocab_size: {vocab_size}")
                 print(f"   Sample text: {full_text[:100]}...")
-                print(f"   Out of bounds tokens: {[t for t in input_ids if t >= vocab_size]}")
-                # Skip this sample to prevent CUDA error
-                print(f"   → Skipping this sample to prevent training crash")
-                continue
-            
-            if min_token_id < 0:
-                print(f"⚠️ WARNING: Negative token ID {min_token_id} found")
-                print(f"   Sample text: {full_text[:100]}...")
-                # Replace negative tokens with UNK token
-                unk_id = self.tokenizer.unk_id() if hasattr(self.tokenizer, 'unk_id') and self.tokenizer.unk_id() >= 0 else 0
-                input_ids = [max(0, min(t, vocab_size-1)) if t >= 0 else unk_id for t in input_ids]
+                
+                # Count issues
+                out_of_bounds_count = len([t for t in input_ids if t >= vocab_size])
+                negative_count = len([t for t in input_ids if t < 0])
+                print(f"   Out-of-bounds tokens: {out_of_bounds_count}, Negative tokens: {negative_count}")
+                
+                # FIX: Clamp all tokens to valid range
+                unk_id = self.tokenizer.unk_id() if hasattr(self.tokenizer, 'unk_id') and self.tokenizer.unk_id() >= 0 else 3
+                input_ids = [
+                    max(0, min(t, vocab_size - 1)) if 0 <= t < vocab_size 
+                    else unk_id 
+                    for t in input_ids
+                ]
+                print(f"   → Fixed: clamped to [0, {vocab_size-1}], using unk_id={unk_id} for invalid tokens")
+                
+                # Verify fix
+                new_max = max(input_ids) if input_ids else -1
+                new_min = min(input_ids) if input_ids else -1
+                print(f"   → After fix: token range [{new_min}, {new_max}] ✅")
             
             # Encode the prompt part with marker to determine masking boundary more accurately
             prompt_with_marker = f"{prompt_marker} {prompt} {response_marker}"
             prompt_ids = self.tokenizer.encode(prompt_with_marker, out_type=int)
             if bos_token is not None:
                 prompt_ids = [bos_token] + prompt_ids
+                
+            # FIX: Also bounds-check prompt_ids
+            if prompt_ids:
+                max_prompt_token = max(prompt_ids)
+                min_prompt_token = min(prompt_ids)
+                if max_prompt_token >= vocab_size or min_prompt_token < 0:
+                    print(f"🚨 FIXING out-of-bounds tokens in prompt_ids:")
+                    print(f"   Prompt token range: [{min_prompt_token}, {max_prompt_token}]")
+                    unk_id = self.tokenizer.unk_id() if hasattr(self.tokenizer, 'unk_id') and self.tokenizer.unk_id() >= 0 else 3
+                    prompt_ids = [
+                        max(0, min(t, vocab_size - 1)) if 0 <= t < vocab_size 
+                        else unk_id 
+                        for t in prompt_ids
+                    ]
+                    print(f"   → Prompt IDs fixed ✅")
                 
             # Truncate if too long
             if len(input_ids) > self.max_length:
