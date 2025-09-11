@@ -20,7 +20,15 @@ def evaluate_pytorch(checkpoint_path, dataset_loader, device="cpu"):
 
     total_loss, total_tokens = 0, 0
     with torch.no_grad():
-        for input_ids, targets in dataset_loader:
+        for batch in dataset_loader:
+            # Handle both 2-value and 3-value returns from dataset
+            if len(batch) == 3:
+                input_ids, targets, weights = batch
+            elif len(batch) == 2:
+                input_ids, targets = batch
+            else:
+                raise ValueError(f"Unexpected batch format: expected 2 or 3 values, got {len(batch)}")
+                
             input_ids, targets = input_ids.to(device), targets.to(device)
             logits = model(input_ids)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
@@ -45,7 +53,15 @@ def evaluate_onnx(onnx_path, dataset_loader, device=None):
     )
 
     total_loss, total_tokens = 0, 0
-    for input_ids, targets in dataset_loader:
+    for batch in dataset_loader:
+        # Handle both 2-value and 3-value returns from dataset
+        if len(batch) == 3:
+            input_ids, targets, weights = batch
+        elif len(batch) == 2:
+            input_ids, targets = batch
+        else:
+            raise ValueError(f"Unexpected batch format: expected 2 or 3 values, got {len(batch)}")
+            
         input_ids_np = input_ids.numpy()
         logits = session.run(None, {"input_ids": input_ids_np})[0]
         logits = torch.tensor(logits)  # Convert back to torch for loss calc
