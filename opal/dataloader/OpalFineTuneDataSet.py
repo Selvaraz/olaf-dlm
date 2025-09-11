@@ -21,12 +21,14 @@ class OpalFinetuneDataset(Dataset):
         pad_id: int = 0,
         bos_id: int = 1,
         eos_id: int = 2,
+        return_weights: bool = True,  # Add option to control return format
     ) -> None:
         self.data = data
         self.tok = tokenizer
         self.max_length = max_length
         self.commands_weight = float(commands_weight)
         self.lazy = bool(lazy)
+        self.return_weights = bool(return_weights)  # Store the option
 
         self.user_tag_open = "<QUESTION>"
         self.user_tag_close = "</QUESTION>"
@@ -196,5 +198,12 @@ class OpalFinetuneDataset(Dataset):
 
     def __getitem__(self, idx: int):
         if self._cache is not None:
-            return self._cache[idx]
-        return self._build_one(idx)
+            result = self._cache[idx]
+        else:
+            result = self._build_one(idx)
+        
+        # Return either 2 or 3 values based on return_weights setting
+        if self.return_weights:
+            return result  # (input_ids, labels, weights)
+        else:
+            return result[0], result[1]  # (input_ids, labels)
