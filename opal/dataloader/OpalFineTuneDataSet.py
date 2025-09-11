@@ -11,7 +11,7 @@ def _json_dumps_min(obj: Any) -> str:
 class OpalFinetuneDataset(Dataset):
     def __init__(
         self,
-        records: List[Dict],
+        data: List[Dict],
         tokenizer,
         max_length: int = 1024,
         commands_weight: float = 3.0,
@@ -22,7 +22,7 @@ class OpalFinetuneDataset(Dataset):
         bos_id: int = 1,
         eos_id: int = 2,
     ) -> None:
-        self.records = records
+        self.data = data
         self.tok = tokenizer
         self.max_length = max_length
         self.commands_weight = float(commands_weight)
@@ -40,7 +40,7 @@ class OpalFinetuneDataset(Dataset):
 
         self._pre = []
         self._has_offsets = False
-        for rec in self.records:
+        for rec in self.data:
             prompt = rec.get("prompt", "")
             response_obj = rec.get("response", {})
             user_text, resp_text, full_text, asst_char_start = self._wrap_texts(prompt, response_obj)
