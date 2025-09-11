@@ -65,6 +65,29 @@ class Opal:
         
         print(f"📊 Collate batch: pad_id={pad_id}, vocab_size={vocab_size}, batch_size={len(batch)}")
 
+        # ✅ IMMEDIATE BOUNDS CHECK: Inspect raw batch data before processing
+        print(f"🔍 Raw batch inspection:")
+        for i, (input_ids, labels) in enumerate(batch):
+            input_min, input_max = input_ids.min().item(), input_ids.max().item()
+            labels_valid = labels[labels != -100]
+            if len(labels_valid) > 0:
+                labels_min, labels_max = labels_valid.min().item(), labels_valid.max().item()
+            else:
+                labels_min, labels_max = -100, -100
+                
+            print(f"   Sample {i}: input_range=[{input_min}, {input_max}], labels_range=[{labels_min}, {labels_max}]")
+            
+            # EMERGENCY: Clamp any out-of-bounds tokens immediately
+            if input_max >= vocab_size or input_min < 0:
+                print(f"   🚨 EMERGENCY CLAMP: Sample {i} input out of bounds!")
+                batch[i] = (torch.clamp(input_ids, 0, vocab_size - 1), labels)
+                
+            if labels_max >= vocab_size or (labels_min < 0 and labels_min != -100):
+                print(f"   🚨 EMERGENCY CLAMP: Sample {i} labels out of bounds!")
+                valid_mask = labels != -100
+                labels[valid_mask] = torch.clamp(labels[valid_mask], 0, vocab_size - 1)
+                batch[i] = (batch[i][0], labels)
+
         # Unzip the batch into separate lists for inputs and labels
         input_ids, labels = zip(*batch)
 
@@ -105,6 +128,29 @@ class Opal:
             padded_inputs = torch.clamp(padded_inputs, 0, vocab_size - 1)
             
             # Also clamp labels (but preserve -100)
+            label_mask = padded_labels != -100
+            padded_labels[label_mask] = torch.clamp(padded_labels[label_mask], 0, vocab_size - 1)
+
+        # ✅ FINAL VERIFICATION: Double-check everything before returning
+        final_input_min, final_input_max = padded_inputs.min().item(), padded_inputs.max().item()
+        final_labels_valid = padded_labels[padded_labels != -100]
+        if len(final_labels_valid) > 0:
+            final_labels_min, final_labels_max = final_labels_valid.min().item(), final_labels_valid.max().item()
+        else:
+            final_labels_min, final_labels_max = -100, -100
+            
+        print(f"🔍 Final batch verification:")
+        print(f"   Input range: [{final_input_min}, {final_input_max}] (must be < {vocab_size})")
+        print(f"   Labels range: [{final_labels_min}, {final_labels_max}] (must be < {vocab_size})")
+        print(f"   Batch shapes: inputs={padded_inputs.shape}, labels={padded_labels.shape}")
+        
+        # ABSOLUTE FINAL CHECK
+        if final_input_max >= vocab_size or final_input_min < 0:
+            print(f"🚨 ABSOLUTE EMERGENCY: Final input still out of bounds!")
+            padded_inputs = torch.clamp(padded_inputs, 0, vocab_size - 1)
+            
+        if final_labels_max >= vocab_size or (final_labels_min < 0 and final_labels_min != -100):
+            print(f"🚨 ABSOLUTE EMERGENCY: Final labels still out of bounds!")
             label_mask = padded_labels != -100
             padded_labels[label_mask] = torch.clamp(padded_labels[label_mask], 0, vocab_size - 1)
 

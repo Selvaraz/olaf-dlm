@@ -105,6 +105,16 @@ class OpalGPT(nn.Module):
         tok_embeds = self.token_embeddings(input_token_ids)
         
         # Get the positional embeddings for the input token IDs
+        # ✅ BOUNDS CHECK: Ensure sequence length doesn't exceed context_length
+        context_length = self.cfg["context_length"]
+        if seq_len > context_length:
+            print(f"🚨 CRITICAL: Sequence length {seq_len} > context_length {context_length}")
+            print(f"   🛡️  EMERGENCY TRUNCATE: Limiting to {context_length}")
+            input_token_ids = input_token_ids[:, :context_length]
+            seq_len = context_length
+            # Recompute embeddings with truncated input
+            tok_embeds = self.token_embeddings(input_token_ids)
+        
         pos_embeds = self.positional_embeddings(
             torch.arange(seq_len, device=input_token_ids.device)
         )
@@ -137,6 +147,29 @@ class OpalGPT(nn.Module):
         loss = None
         # Return the logits
         if labels is not None:
+            # ✅ CRITICAL: Check labels bounds before loss calculation to prevent CUDA errors
+            vocab_size = self.cfg["vocab_size"]
+            labels_flat = labels.view(-1)
+            valid_labels = labels_flat[labels_flat != -100]
+            
+            if len(valid_labels) > 0:
+                labels_min, labels_max = valid_labels.min().item(), valid_labels.max().item()
+                print(f"🔍 Loss calculation bounds check:")
+                print(f"   Labels range: [{labels_min}, {labels_max}] (must be < {vocab_size})")
+                print(f"   Valid labels count: {len(valid_labels)}")
+                
+                if labels_max >= vocab_size or labels_min < 0:
+                    print(f"🚨 CRITICAL: Labels out of bounds in loss calculation!")
+                    print(f"   Out-of-bounds count: {(valid_labels >= vocab_size).sum().item()}")
+                    print(f"   Negative count: {(valid_labels < 0).sum().item()}")
+                    print(f"   🛡️  EMERGENCY CLAMP: Fixing labels before loss calculation")
+                    
+                    # Emergency clamp labels while preserving -100
+                    labels_clamped = labels.clone()
+                    valid_mask = labels_clamped != -100
+                    labels_clamped[valid_mask] = torch.clamp(labels_clamped[valid_mask], 0, vocab_size - 1)
+                    labels = labels_clamped
+            
             loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
             # loss = loss_fct(logits.view(-1, self.cfg["vocab_size"]), labels.view(-1))
             loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
