@@ -63,10 +63,7 @@ class Opal:
             print(f"   → Using 0 as pad_id to prevent CUDA error")
             pad_id = 0  # Use 0 as fallback
         
-        print(f"📊 Collate batch: pad_id={pad_id}, vocab_size={vocab_size}, batch_size={len(batch)}")
-
         # ✅ IMMEDIATE BOUNDS CHECK: Inspect raw batch data before processing
-        print(f"🔍 Raw batch inspection:")
         for i, (input_ids, labels) in enumerate(batch):
             input_min, input_max = input_ids.min().item(), input_ids.max().item()
             labels_valid = labels[labels != -100]
@@ -75,8 +72,6 @@ class Opal:
             else:
                 labels_min, labels_max = -100, -100
                 
-            print(f"   Sample {i}: input_range=[{input_min}, {input_max}], labels_range=[{labels_min}, {labels_max}]")
-            
             # EMERGENCY: Clamp any out-of-bounds tokens immediately
             if input_max >= vocab_size or input_min < 0:
                 print(f"   🚨 EMERGENCY CLAMP: Sample {i} input out of bounds!")
@@ -139,11 +134,6 @@ class Opal:
         else:
             final_labels_min, final_labels_max = -100, -100
             
-        print(f"🔍 Final batch verification:")
-        print(f"   Input range: [{final_input_min}, {final_input_max}] (must be < {vocab_size})")
-        print(f"   Labels range: [{final_labels_min}, {final_labels_max}] (must be < {vocab_size})")
-        print(f"   Batch shapes: inputs={padded_inputs.shape}, labels={padded_labels.shape}")
-        
         # ABSOLUTE FINAL CHECK
         if final_input_max >= vocab_size or final_input_min < 0:
             print(f"🚨 ABSOLUTE EMERGENCY: Final input still out of bounds!")
@@ -438,91 +428,168 @@ class Opal:
             return torch.load(pretokenized_path)
 
     # Ex: top_p=0.9 and optionally temperature > 0.7
-    def generate(self, model, idx, max_new_tokens, context_size, 
-                    temperature=0.0, top_k=None, top_p=None, 
-                    eos_id=None, repetition_penalty=1.2):
+    def generate(
+    self,
+    model,
+    idx: torch.Tensor,                  # [B, T] token ids (usually B=1 for sampling)
+    max_new_tokens: int,
+    context_size: int,                  # model's max context length (e.g., pos_emb size)
+    top_k: int | None = None,
+    top_p: float | None = None,         # nucleus sampling (0<top_p<=1)
+    temperature: float = 1.0,           # 0 => greedy
+    eos_id: int | None = None,
+    repetition_penalty: float = 1.0,    # >1.0 penalizes repeats
+    ) -> torch.Tensor:
+        """
+        Generate tokens autoregressively with top-k / top-p (nucleus) filtering,
+        temperature scaling, and an improved repetition penalty that weighs recent occurrences.
 
-        # The following loop generates one token at a time, for a total
-        # of max_new_tokens iterations. At each iteration, the model
-        # is fed the current sequence (idx) and generates a new token.
-        # The new token is then appended to the current sequence, and
-        # the loop continues until max_new_tokens tokens have been
-        # generated.
-        for _ in range(max_new_tokens):
-            # Get the last `context_size` tokens as input (context window)
-            idx_cond = idx[:, -context_size:]
+        This function is hardened against advanced-indexing mistakes that can
+        cause CUDA device-side asserts (IndexKernel). In particular, top-p filtering
+        uses scatter() / masked_fill() per-batch instead of 2D tensor fancy indexing.
+        """
+        model.eval()
+        device = idx.device
 
-            # Perform inference to get logits for the next token
-            with torch.no_grad():
+        B = idx.size(0)
+        assert B >= 1, "idx must have batch dimension >=1 (e.g., [1, T])"
+
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+
+                # Keep the last `context_size` tokens to stay within the positional embedding range
+                idx_cond = idx[:, -context_size:]
+
+                # Forward pass
                 model_output = model(idx_cond)
-            
-            logits = model_output["logits"] if isinstance(model_output, dict) else model_output
-            logits = logits[:, -1, :]  # ✅ Take only last token logits
+                # ✅ Take only last token logits
+                logits = model_output["logits"] if isinstance(model_output, dict) else model_output
+                logits = logits[:, -1, :]  # [B, V] — logits for the next-token position only
+                V = logits.size(-1)
 
-            # 🚨 SIMPLIFIED: Basic repetition penalty to avoid complex tensor operations
-            if repetition_penalty > 1.0:
-                # Simple approach: penalize all tokens that appeared in the sequence
-                for token in set(idx[0].tolist()):
-                    if logits[0, token] > 0:
-                        logits[0, token] /= repetition_penalty
+                # ---------------------------------------------------------------------
+                # Improved repetition penalty - penalize recently repeated tokens more heavily
+                # We apply a stronger penalty for tokens that appear multiple times
+                # in the *recent* context (last 20 tokens), with extra weight for
+                # very recent (last 3) positions.
+                # ---------------------------------------------------------------------
+                if repetition_penalty and repetition_penalty > 1.0:
+                    # Consider only the last 20 tokens per sequence
+                    window = min(20, idx_cond.size(1))
+                    recent = idx_cond[:, -window:]  # [B, W]
+                    # Clamp recent tokens to valid vocab just in case (prevents indexing surprises)
+                    recent = recent.clamp_(0, V - 1)
+
+                    # For B==1 (typical sampling) we can do a fast path; otherwise do a loop
+                    for b in range(B):
+                        recent_b = recent[b]  # [W]
+                        # Count occurrences and remember positions
+                        # Build a map: token_id -> positions (0..W-1)
+                        # (Python dict is fine at tiny W; this keeps code clear.)
+                        token_positions = {}
+                        # Enumerate from left to right; positions grow with recency
+                        for i_pos, tok in enumerate(recent_b.tolist()):
+                            token_positions.setdefault(tok, []).append(i_pos)
+
+                        # Apply penalties
+                        # We only touch tokens that appear more than once to avoid over-penalizing
+                        # legitimate single occurrences.
+                        for tok, positions in token_positions.items():
+                            if len(positions) <= 1:
+                                continue
+                            # Base frequency penalty scales with count
+                            freq_pen = repetition_penalty ** len(positions)
+
+                            # Extra penalty for *very* recent repetition (appeared in last 3 tokens)
+                            most_recent_pos = positions[-1]
+                            if most_recent_pos >= window - 3:
+                                freq_pen *= 1.5
+
+                            # Apply to the corresponding logit (batched-safe)
+                            # Guard for safety in case tok somehow falls outside [0, V-1]
+                            if 0 <= tok < V:
+                                # If logit is positive we divide; if negative we multiply (GPT-2 style)
+                                # to reduce the probability of repeated tokens while preserving sign.
+                                if logits[b, tok] > 0:
+                                    logits[b, tok] = logits[b, tok] / freq_pen
+                                else:
+                                    logits[b, tok] = logits[b, tok] * freq_pen
+
+                # ---------------------------------------------------------------------
+                #  Apply temperature scaling (makes probabilities sharper or smoother)
+                # ---------------------------------------------------------------------
+                if temperature is not None and temperature > 0.0:
+                    logits = logits / temperature
+                    # (If temperature == 0.0 we will fall back to greedy after filtering.)
+                # else: keep original logits for greedy
+
+                # ---------------------------------------------------------------------
+                # Top-k filtering (keep only the k highest logit tokens per row)
+                # ---------------------------------------------------------------------
+                if top_k is not None and top_k > 0 and top_k < V:
+                    # min value per row to keep
+                    topk_vals, _ = logits.topk(top_k, dim=-1)                 # [B, k]
+                    kth = topk_vals[..., -1, None]                            # [B, 1]
+                    # Mask out everything below the kth value
+                    logits = torch.where(logits < kth, torch.full_like(logits, float('-inf')), logits)
+
+                # ---------------------------------------------------------------------
+                # Top-p (nucleus) filtering (keep the smallest set whose cumulative prob >= p)
+                # IMPORTANT: do all masking per-batch via scatter()/masked_fill() to avoid
+                #            out-of-bounds advanced indexing on [B, V] tensors.
+                # ---------------------------------------------------------------------
+                if top_p is not None and 0.0 < top_p < 1.0:
+                    # Work on softmax probabilities in *sorted* order
+                    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)  # [B, V]
+                    probs = torch.softmax(sorted_logits, dim=-1)                                  # [B, V]
+                    cumulative_probs = probs.cumsum(dim=-1)                                       # [B, V]
+
+                    # Tokens to remove: those after the nucleus
+                    sorted_indices_to_remove = cumulative_probs > top_p                           # [B, V]
+                    # Shift to always keep at least the first (highest-prob) token
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = False
+
+                    # ✅ Scatter the "remove" mask back to original indices
+                    indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)                # [B, V]
+                    indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
+
+                    # ✅ Mask them out in-place (batched safe)
+                    logits = logits.masked_fill(indices_to_remove, float('-inf'))
+
+                # ---------------------------------------------------------------------
+                # Sample or greedy-pick the next token
+                # ---------------------------------------------------------------------
+                if temperature is not None and temperature <= 0.0:
+                    # Greedy (argmax) if temperature==0
+                    next_token = torch.argmax(logits, dim=-1, keepdim=True)  # [B, 1]
+                else:
+                    # Convert to proper probabilities after all filtering
+                    probs = torch.softmax(logits, dim=-1)                    # [B, V]
+
+                    # Safety: if a row becomes all -inf (rare with top-k/p), fallback to argmax
+                    # (softmax(-inf) -> NaN); detect and recover.
+                    nan_rows = torch.isnan(probs).any(dim=-1)                # [B]
+                    if nan_rows.any():
+                        fallback = torch.argmax(logits[nan_rows], dim=-1, keepdim=True)
+                        # initialize next_token with multinomial then patch fallback rows
+                        next_token = torch.multinomial(
+                            torch.softmax(torch.where(nan_rows[:, None], torch.zeros_like(logits), logits), dim=-1),
+                            num_samples=1
+                        )
+                        next_token[nan_rows] = fallback
                     else:
-                        logits[0, token] *= repetition_penalty
+                        next_token = torch.multinomial(probs, num_samples=1)  # [B, 1]
 
-            #  Apply temperature scaling (makes probabilities sharper or smoother)
-            if temperature > 0.0:
-                logits = logits / temperature
+                # Append sampled token
+                idx = torch.cat([idx, next_token], dim=1)  # [B, T+1]
 
-            # Optional: Top-k filtering (keep only the top-k highest probability tokens)
-            if top_k is not None:
-                # Get top-k logits
-                top_logits, _ = torch.topk(logits, top_k)
-                min_val = top_logits[:, -1]  # Smallest value among top-k
-                # Replace logits below the kth value with -inf so they are ignored
-                logits = torch.where(
-                    logits < min_val,
-                    torch.tensor(float('-inf')).to(logits.device),
-                    logits
-                )
+                # Early stop if EOS reached for all sequences
+                if eos_id is not None:
+                    if torch.all(next_token.squeeze(-1) == eos_id):
+                        break
 
-            # 🔹  Top-p (nucleus) filtering
-            # Instead of a fixed k, this dynamically keeps the smallest set of tokens
-            # whose cumulative probability ≤ p.
-            if top_p is not None:
-                # Sort logits in descending order
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                # Convert logits to probabilities
-                probs = torch.softmax(sorted_logits, dim=-1)
-                # Compute cumulative probabilities
-                cumulative_probs = torch.cumsum(probs, dim=-1)
-
-                # Identify tokens where cumulative probability > p
-                sorted_indices_to_remove = cumulative_probs > top_p
-                # Shift mask so that the first token above p is kept
-                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                sorted_indices_to_remove[..., 0] = 0  # Always keep the highest probability token
-
-                # Set logits of removed tokens to -inf
-                # Set logits of removed tokens to -inf (batched-safe)
-                indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)
-                indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
-                logits = logits.masked_fill(indices_to_remove, float("-inf"))
-
-            # Choose next token
-            if temperature > 0.0:
-                # If temperature > 0, sample from probability distribution
-                probs = torch.softmax(logits, dim=-1)  # Convert logits to probabilities
-                idx_next = torch.multinomial(probs, num_samples=1)  # Random sampling
-            else:
-                # Greedy decoding: pick the token with highest logit
-                idx_next = torch.argmax(logits, dim=-1, keepdim=True)
-
-            # Stop early if EOS (end-of-sequence) token is generated
-            if eos_id is not None and idx_next.item() == eos_id:
-                break
-
-            # Append the predicted token to the sequence
-            idx = torch.cat((idx, idx_next), dim=1)  # Sequence grows by 1 token
-
+        model.train()  # restore training mode for caller, if needed
         return idx
 
 
@@ -754,9 +821,11 @@ class Opal:
                 #     model, tokenizer, device, start_context
                 # )
 
-                self.generate_with_topk(
-                    model, tokenizer, device, start_context, top_k=50
-                )
+                # Generate sample text every 500 steps for monitoring
+                if global_step % 1000 == 0 and global_step > 0:
+                    self.generate_with_topk(
+                        model, tokenizer, device, start_context, top_k=50
+                    )
 
                 # Evaluation - only check on actual weight update steps
                 if is_accumulation_step or is_last_batch:

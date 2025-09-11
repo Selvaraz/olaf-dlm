@@ -93,7 +93,7 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
     "attention_drop_rate": 0.15,
 
     # 🔹 Fine-tuning Hyperparameters - Ultra conservative for overfitting prevention
-    "num_epoch": 2,                   # 🔧 Even fewer epochs 
+    "num_epoch": 3,                   # 🔧 Even fewer epochs 
     "learning_rate": 1e-7,            # 🔧 Much much lower LR to slow learning
     "weight_decay": 0.05,             # 🔧 More weight decay
     "early_stopping_patience": 8,     # 🔧 More patience 
