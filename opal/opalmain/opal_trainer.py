@@ -35,8 +35,6 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 # For weights and biases logging
 import wandb
-# MPS Support for Apple Silicon
-from ..utils.mps_utils import setup_mps_environment, create_mps_safe_dataloader, mps_safe_optimizer_step, aggressive_mps_cleanup, ultra_conservative_mps_cleanup, check_mps_memory_safety, extreme_mps_cleanup, mps_memory_safe_backward
 
 
 class Opal:
@@ -48,14 +46,6 @@ class Opal:
         self.start_fresh = start_fresh
         self.is_finetune = is_finetune
         self.finetune_data_path = finetune_data_path
-        
-        # 🍎 MPS Setup for Apple Silicon (M1/M2/M3)
-        if torch.backends.mps.is_available() and self.is_finetune:
-            print("🍎 Apple Silicon MPS detected - Setting up environment for fine-tuning")
-            setup_mps_environment()
-            self.use_mps = True
-        else:
-            self.use_mps = False
     
     def collate_finetune(self, batch):
         from torch.nn.utils.rnn import pad_sequence
@@ -165,27 +155,16 @@ class Opal:
 
         print(f"✅ Creating Fine-tune DataLoader → batch_size={batch_size}, shuffle={shuffle}, workers={num_workers}")
 
-        # 🍎 MPS-Safe DataLoader for Apple Silicon fine-tuning
-        if self.use_mps and self.is_finetune:
-            print("🍎 Using MPS-optimized DataLoader for fine-tuning")
-            return create_mps_safe_dataloader(
-                dataset,
-                batch_size=batch_size,
-                shuffle=shuffle,
-                drop_last=drop_last,
-                collate_fn=self.collate_finetune
-            )
-        else:
-            # Standard DataLoader for CUDA/CPU
-            return DataLoader(
-                dataset,
-                batch_size=batch_size,
-                shuffle=shuffle,
-                drop_last=drop_last,
-                num_workers=num_workers,
-                pin_memory=True,
-                collate_fn=self.collate_finetune
-            )
+        # Standard DataLoader for CUDA/CPU
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=drop_last,
+            num_workers=num_workers,
+            pin_memory=True,
+            collate_fn=self.collate_finetune
+        )
 
     def createOpalDataLoader(
         self,
@@ -584,22 +563,6 @@ class Opal:
         #     use_mixed_precision = False
         #     print(f"🔧 Mixed precision FORCED OFF for fine-tuning stability")
         
-        # 🍎 MPS-specific fine-tuning optimizations for Apple Silicon
-        if self.use_mps and self.is_finetune:
-            # Force disable mixed precision on MPS for stability
-            use_mixed_precision = False
-            scaler = None
-            print(f"🍎 MPS Fine-tuning: Mixed precision DISABLED for stability")
-            
-            # More aggressive gradient accumulation for memory efficiency
-            if gradient_accumulation_steps < 2:
-                gradient_accumulation_steps = 2
-                print(f"🍎 MPS Fine-tuning: Gradient accumulation increased to {gradient_accumulation_steps}")
-            
-            # More frequent memory cleanup interval
-            self.mps_cleanup_interval = 50  # Clean memory every 50 batches
-            print(f"🍎 MPS Fine-tuning: Memory cleanup every {self.mps_cleanup_interval} batches")
-        
         scaler = get_scaler() if use_mixed_precision else None
 
         # FINETUNE_PH2: Adaptive Warmup - both pretraining and fine-tuning benefit from warmup
@@ -627,12 +590,8 @@ class Opal:
         print(f"📊 Mixed precision: {use_mixed_precision}")
         print(f"📊 Max gradient norm: {max_grad_norm}")
         print(f"📊 Device: {device}")
-        if self.use_mps and self.is_finetune:
-            print(f"🍎 Apple Silicon MPS: ENABLED for fine-tuning")
-            print(f"🍎 MPS Memory optimization: Active")
-        print(f"🚀 ==========================================")
-        
-        # Create warmup scheduler
+        print(f"📊 warmup_steps: {warmup_steps}")
+        print(f"🚀 ==========================================")        # Create warmup scheduler
         def lr_lambda(step):
             if step < warmup_steps:
                 return float(step) / float(max(1, warmup_steps))
@@ -651,11 +610,6 @@ class Opal:
             print(f"📊 Best validation loss so far: {best_val_loss:.6f}")
             print(f"📊 Epochs without improvement: {epochs_no_improve}")
             
-            # 🍎 Ultra-conservative MPS memory cleanup at epoch start
-            if self.use_mps and self.is_finetune:
-                ultra_conservative_mps_cleanup()
-                print("🍎 Epoch-level MPS memory cleanup completed")
-            
             # 🔍 DEBUG: Check what's actually in self.config
             if 'learning_rate' in self.config:
                 print(f"🔍 DEBUG: self.config['learning_rate']: {self.config['learning_rate']}")
@@ -672,49 +626,14 @@ class Opal:
             # Training loop with gradient accumulation
             accumulated_loss = 0.0
             for batch_idx, (input_ids, targets, weights) in enumerate(pbar):
-                # Move input and targ`et tensors to the specified device
+                # Move input and target tensors to the specified device
                 input_ids = input_ids.to(device, non_blocking=True)
                 targets = targets.to(device, non_blocking=True)
                 if weights is not None:
                     weights = weights.to(device, non_blocking=True)
 
-                # 🍎 MPS-specific token corruption detection and fix
-                if self.use_mps and self.is_finetune:
-                    # Check for extreme token values indicating memory corruption
-                    input_min, input_max = input_ids.min().item(), input_ids.max().item()
-                    target_min, target_max = targets.min().item(), targets.max().item()
-                    vocab_size = self.config.get('vocab_size', 12000)
-                    
-                    # Detect corruption (extreme values way outside vocab range)
-                    input_corrupted = input_min < -1000 or input_max > vocab_size * 10
-                    target_corrupted = target_min < -1000 or target_max > vocab_size * 10
-                    
-                    if input_corrupted or target_corrupted:
-                        print(f"🚨 MPS TOKEN CORRUPTION DETECTED!")
-                        print(f"   Input range: [{input_min}, {input_max}]")
-                        print(f"   Target range: [{target_min}, {target_max}]")
-                        print(f"   Vocab size: {vocab_size}")
-                        print(f"🛡️  EMERGENCY: Skipping corrupted batch and cleaning memory")
-                        
-                        # Ultra-aggressive memory cleanup for corruption
-                        ultra_conservative_mps_cleanup()
-                        continue
-
-                # Calculate loss for this batch with extra MPS memory safety
-                if device == 'mps':
-                    # Check memory before proceeding
-                    if not check_mps_memory_safety(threshold_gb=2.5):  # Even more conservative
-                        print("🚨 MPS Memory limit reached, skipping batch")
-                        continue
-                    
-                    # Extra aggressive cleanup before loss calculation
-                    ultra_conservative_mps_cleanup()
-                
+                # Calculate loss for this batch
                 loss = self.calc_loss_batch(input_ids, targets, weights, model, device)
-                
-                # Immediate cleanup after loss calculation for MPS
-                if device == 'mps':
-                    ultra_conservative_mps_cleanup()
                 
                 # Scale loss by gradient accumulation steps to get the average
                 loss = loss / gradient_accumulation_steps
@@ -727,18 +646,7 @@ class Opal:
                     continue
 
                 # Backpropagation with mixed precision if enabled
-                if self.use_mps and self.is_finetune:
-                    # Use memory-safe backward for MPS
-                    try:
-                        mps_memory_safe_backward(loss, cleanup_before=True, cleanup_after=True)
-                    except RuntimeError as e:
-                        if "out of memory" in str(e).lower():
-                            print("🚨 MPS OOM during backward - skipping batch")
-                            extreme_mps_cleanup()
-                            continue
-                        else:
-                            raise e
-                elif use_mixed_precision:
+                if use_mixed_precision:
                     scaler.scale(loss).backward()
                 else:
                     loss.backward()
@@ -750,25 +658,7 @@ class Opal:
                 if is_accumulation_step or is_last_batch:
                     total_norm = 0.0  # For gradient norm calculation
                     
-                    # 🍎 MPS-optimized gradient step for Apple Silicon fine-tuning
-                    if self.use_mps and self.is_finetune:
-                        # Use MPS-safe optimizer step (backward already called above)
-                        step_taken = mps_safe_optimizer_step(
-                            optimizer, model, 
-                            gradient_accumulation_steps, 
-                            batch_idx,  # Use batch_idx instead of global_step for accumulation logic
-                            max_grad_norm
-                        )
-                        # Calculate gradient norm for logging (MPS-safe)
-                        for p in model.parameters():
-                            if p.grad is not None:
-                                param_norm = p.grad.data.norm(2)
-                                total_norm += param_norm.item() ** 2
-                        total_norm = total_norm ** 0.5
-                        
-                        # Note: MPS function handles optimizer.zero_grad() internally
-                        # So we don't need the "Zero gradients after weight update" section
-                    elif use_mixed_precision:
+                    if use_mixed_precision:
                         # Unscale gradients before clipping
                         scaler.unscale_(optimizer)
                         
@@ -796,9 +686,8 @@ class Opal:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                         optimizer.step()
 
-                    # Zero gradients after weight update (except for MPS which handles it internally)
-                    if not (self.use_mps and self.is_finetune):
-                        optimizer.zero_grad(set_to_none=True)
+                    # Zero gradients after weight update
+                    optimizer.zero_grad(set_to_none=True)
 
                     # Update learning rate and global step only after actual weight updates
                     if global_step < warmup_steps:
@@ -814,18 +703,6 @@ class Opal:
                             scheduler.step()
 
                     global_step += 1
-                    
-                    # 🍎 MPS ultra-frequent memory cleanup for fine-tuning stability
-                    if self.use_mps and self.is_finetune:
-                        # EXTREME: Cleanup after every single batch to prevent memory buildup
-                        extreme_mps_cleanup()
-                        
-                        # Monitor memory continuously
-                        from ..utils.mps_utils import get_mps_memory_info
-                        memory_info = get_mps_memory_info()
-                        if memory_info['total_gb'] > 2.0:  # Continuous monitoring
-                            print(f"🍎 Continuous cleanup: {memory_info['total_gb']:.2f}GB")
-                            extreme_mps_cleanup()
                     
                     # Generate sample every 1000 iterations to monitor quality (AFTER increment)
                     # if global_step > 0 and global_step % 1000 == 0:
@@ -860,15 +737,6 @@ class Opal:
                     # Adaptive evaluation frequency for pretraining vs fine-tuning
                     eval_frequency = eval_freq if not self.is_finetune else max(eval_freq * 4, 100)
                     if global_step % eval_frequency == 0 and global_step > 0:
-                        # 🍎 MPS Memory cleanup before evaluation for Apple Silicon
-                        if self.use_mps and self.is_finetune:
-                            if torch.backends.mps.is_available() and hasattr(torch.mps, 'empty_cache'):
-                                try:
-                                    torch.mps.empty_cache()
-                                    torch.mps.synchronize()
-                                except Exception as e:
-                                    print(f"⚠️ MPS cache cleanup warning: {e}")
-                        
                         train_loss, val_loss = self.evaluate_model(
                             model, train_loader, val_loader, device, eval_iter)
                         train_losses.append(train_loss)
@@ -1315,67 +1183,14 @@ class Opal:
         """
 
         # Move inputs to the correct device
-        # 🍎 MPS-safe tensor transfer for Apple Silicon
-        if self.use_mps and self.is_finetune and device == "mps":
-            # 🍎 ULTRA-AGGRESSIVE: Truncate sequences for MPS memory constraints
-            max_seq_len = self.config.get('max_seq_length', 256)
-            if input_batch.size(1) > max_seq_len:
-                input_batch = input_batch[:, :max_seq_len]
-                target_batch = target_batch[:, :max_seq_len]
-                #print(f"🍎 MPS: Truncated sequence to {max_seq_len} tokens")
-            
-            input_batch = input_batch.to(device, non_blocking=False)  # MPS requires blocking transfer
-            target_batch = target_batch.to(device, non_blocking=False)
-            weights = weights.to(device, non_blocking=False) if weights is not None else None
-            
-            # 🍎 MPS-specific token validation and correction
-            vocab_size = self.config.get('vocab_size', 12000)
-            
-            # Check input tokens
-            input_min, input_max = input_batch.min().item(), input_batch.max().item()
-            if input_min < 0 or input_max >= vocab_size:
-                print(f"🚨 MPS INPUT TOKENS OUT OF BOUNDS!")
-                print(f"   Range: [{input_min}, {input_max}], Vocab: {vocab_size}")
-                input_batch = torch.clamp(input_batch, 0, vocab_size - 1)
-                print(f"🛡️  CLAMPED input tokens to [0, {vocab_size - 1}]")
-            
-            # Check target tokens (allow -100 for ignore_index)
-            target_min, target_max = target_batch.min().item(), target_batch.max().item()
-            valid_targets = (target_batch >= 0) & (target_batch < vocab_size)
-            ignore_targets = target_batch == -100
-            invalid_targets = ~(valid_targets | ignore_targets)
-            
-            if invalid_targets.any():
-                print(f"🚨 MPS TARGET TOKENS OUT OF BOUNDS!")
-                print(f"   Range: [{target_min}, {target_max}], Vocab: {vocab_size}")
-                print(f"   Invalid count: {invalid_targets.sum().item()}")
-                # Set invalid targets to ignore_index
-                target_batch = torch.where(invalid_targets, -100, target_batch)
-                print(f"🛡️  SET invalid targets to ignore_index (-100)")
-        else:
-            input_batch = input_batch.to(device)
-            target_batch = target_batch.to(device)
-            weights = weights.to(device) if weights is not None else None
+        input_batch = input_batch.to(device)
+        target_batch = target_batch.to(device)
+        weights = weights.to(device) if weights is not None else None
 
         # 1️⃣ Forward pass: Let the model compute logits and loss
         # If labels are provided, the model itself computes loss (with ignore_index=-100)
         
-        # 🍎 MPS-specific memory-safe forward pass
-        if device == 'mps':
-            # Clear cache before forward pass
-            if hasattr(torch.mps, 'empty_cache'):
-                torch.mps.empty_cache()
-            
-            # Use gradient checkpointing for MPS to save memory
-            if hasattr(model, 'gradient_checkpointing_enable'):
-                model.gradient_checkpointing_enable()
-        
         model_output = model(input_batch, labels=target_batch)
-        
-        # 🍎 MPS memory cleanup after forward pass
-        if device == 'mps':
-            if hasattr(torch.mps, 'empty_cache'):
-                torch.mps.empty_cache()
 
         # 2️⃣ Extract loss properly
         if isinstance(model_output, dict):
@@ -1435,14 +1250,6 @@ class Opal:
             
             loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
             loss = loss_fct(logits.view(-1, logits.size(-1)), target_batch.view(-1))
-
-        # 🍎 MPS synchronization for Apple Silicon fine-tuning
-        if self.use_mps and self.is_finetune and device == "mps":
-            if hasattr(torch.mps, 'synchronize'):
-                try:
-                    torch.mps.synchronize()
-                except Exception as e:
-                    print(f"⚠️ MPS synchronization warning: {e}")
 
         return loss
 
@@ -1918,26 +1725,6 @@ class Opal:
         # Retrieve class-level flags for fine-tuning  #Finetune-Optional
         is_finetune = getattr(self, "is_finetune", False)
         finetune_data_path = getattr(self, "finetune_data_path", None)
-
-        # 🍎 MPS device optimization for Apple Silicon fine-tuning
-        if self.use_mps and self.is_finetune and torch.backends.mps.is_available():
-            if device != "mps":
-                print(f"🍎 Overriding device '{device}' to 'mps' for Apple Silicon fine-tuning")
-                device = "mps"
-            print(f"🍎 Apple Silicon MPS device activated for fine-tuning")
-            
-            # Set optimal MPS settings and environment variables
-            if 'PYTORCH_MPS_HIGH_WATERMARK_RATIO' not in os.environ:
-                os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.7'
-                print(f"🍎 Set PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.7 for memory management")
-            
-            # Set optimal MPS settings
-            if hasattr(torch.mps, 'empty_cache'):
-                try:
-                    torch.mps.empty_cache()
-                    print(f"🍎 MPS cache cleared and ready for fine-tuning")
-                except Exception as e:
-                    print(f"⚠️ MPS cache clear warning: {e}")
 
         # ----------------------------------------
         # Logging Setup

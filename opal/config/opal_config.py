@@ -123,7 +123,7 @@ _TRAINING_CONFIG_GPU = {
     "batch_size": 4,              # 🔧 Even smaller batches for ultra-conservative training
     "num_workers": 2,             # 🔧 Reduced further for stability
     "mixed_precision": True,     # 🔧 Disabled for fine-tuning stability
-    "gradient_accumulation_steps": 2  # 🔧 Matches model config for effective batch size 32
+    "gradient_accumulation_steps": 4  # 🔧 Matches model config for effective batch size 32
 }
 
 # 🍎 MPS-specific ultra-conservative configuration for Apple Silicon
