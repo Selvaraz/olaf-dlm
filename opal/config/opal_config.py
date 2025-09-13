@@ -97,12 +97,12 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
     "attention_drop_rate": 0.1,   # 🔧 Reduced from 0.15
     "qkv_bias": True,
     "num_epoch": 2,               # 🔧 ULTRA-CONSERVATIVE: Reduced from 3 to prevent forgetting
-    "learning_rate": 5e-7,        # 🔧 CRITICAL: Much lower to prevent catastrophic forgetting
+    "learning_rate": 3e-7,        # 🔧 CRITICAL: Much lower to prevent catastrophic forgetting
     "weight_decay": 0.005,        # 🔧 Reduced from 0.01 - minimal regularization
     "warmup_steps": 100,          # 🔧 Adjusted for 2 epochs
     "early_stopping_patience": 1, # 🔧 Very quick stopping if overfitting
     "persistent_workers": False,
-    "gradient_accumulation_steps": 8, # 🔧 Larger accumulation for stability
+    "gradient_accumulation_steps": 2, # 🔧 Larger accumulation for stability
     "lr_scheduler": "cosine",
     "max_grad_norm": 0.3,         # 🔧 Much stricter gradient clipping
     "kv_heads" : 1,                # MQA
@@ -123,11 +123,30 @@ _TRAINING_CONFIG_GPU = {
     "batch_size": 4,              # 🔧 Even smaller batches for ultra-conservative training
     "num_workers": 2,             # 🔧 Reduced further for stability
     "mixed_precision": True,     # 🔧 Disabled for fine-tuning stability
-    "gradient_accumulation_steps": 8  # 🔧 Matches model config for effective batch size 32
+    "gradient_accumulation_steps": 2  # 🔧 Matches model config for effective batch size 32
+}
+
+# 🍎 MPS-specific ultra-conservative configuration for Apple Silicon
+_TRAINING_CONFIG_MPS = {
+    'batch_size': 1,
+    'gradient_accumulation_steps': 1,  # Reduced from 2 to 1 (no accumulation)
+    'mixed_precision': False,
+    'num_workers': 0,
+    'learning_rate': 1e-5,
+    'max_tokens_per_batch': 32,   # Reduced from 64 to 32 (extreme)
+    'max_seq_length': 32,         # Reduced from 64 to 32 (extreme)
+    'micro_batch_size': 1,        # Added micro-batching
+    'use_gradient_checkpointing': True,  # Enable gradient checkpointing
 }
 
 OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_FINETUNE_45M
-TRAINING_CONFIG = _TRAINING_CONFIG_GPU
+
+# Automatically select configuration based on device
+if torch.backends.mps.is_available():
+    TRAINING_CONFIG = _TRAINING_CONFIG_MPS
+    print("🍎 Using MPS-specific ultra-conservative configuration")
+else:
+    TRAINING_CONFIG = _TRAINING_CONFIG_GPU
 
 
 # _GPT_CONFIG_OPAL_FINETUNE_45M = {

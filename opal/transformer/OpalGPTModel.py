@@ -7,6 +7,11 @@ class OpalGPT(nn.Module):
     def __init__(self, cfg):
         super().__init__()
 
+        # ✅ MPS INIT FIX: Set proper default dtype and memory management
+        if torch.backends.mps.is_available():
+            torch.set_default_dtype(torch.float32)  # MPS works best with float32
+            print("🍎 MPS DETECTED: Setting float32 as default dtype")
+
         # Embeddings layer for tokens and positions in the input sequence
         self.token_embeddings = nn.Embedding(cfg["vocab_size"], cfg["emb_dim"])
         # Positional embeddings to encode the position of each token in the sequence
@@ -54,6 +59,10 @@ class OpalGPT(nn.Module):
         if self.out_head.out_features != cfg["vocab_size"]:
             print(f"🚨 CRITICAL MISMATCH: Output head size != config vocab_size")
 
+        # ✅ MPS MEMORY OPTIMIZATION: Initialize tracking variables
+        self._mps_step_counter = 0
+        self._mps_memory_cleanup_frequency = 50
+
         self.apply(self._init_weights)
 
     # Initialize the weights of the model, the reason for this 
@@ -68,27 +77,32 @@ class OpalGPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
+    def _mps_safe_preprocessing(self, input_token_ids, labels=None):
+        """MPS-specific preprocessing to ensure tensor compatibility."""
+        device = input_token_ids.device
+        
+        if device.type == 'mps':
+            # ✅ MPS FIX: Ensure proper tensor types
+            input_token_ids = input_token_ids.long()
+            if labels is not None:
+                labels = labels.long()
+            
+            # ✅ MPS FIX: Periodic memory management
+            self._mps_step_counter += 1
+            if self._mps_step_counter % self._mps_memory_cleanup_frequency == 0:
+                if hasattr(torch.mps, 'empty_cache'):
+                    torch.mps.empty_cache()
+                torch.mps.synchronize()
+        
+        return input_token_ids, labels
+
     def forward(self, input_token_ids, labels=None, past_key_values=None, use_cache=False):
         """
-        Compute the output of the GPT model given an input sequence.
-
-        Parameters
-        ----------
-        in_idx : torch.LongTensor
-            Input sequence of shape (batch_size, sequence_length)
-        labels : torch.LongTensor
-            Labels of shape (batch_size, sequence_length)
-
-        Returns
-        -------
-        logits : torch.FloatTensor
-            Output logits of shape (batch_size, sequence_length, vocab_size)
+        MPS-optimized forward pass with comprehensive error handling.
         """
-        # cache: added (past_key_values, use_cache) to support fast decode with KV-cache.
-        #        - past_key_values: list of (past_key, past_value) per layer, or None
-        #        - when use_cache=True, we also return present_key_values for the next step
-
-        # Get the batch size and sequence length from the input token IDs
+        # ✅ MPS PREPROCESSING: Handle MPS-specific requirements
+        input_token_ids, labels = self._mps_safe_preprocessing(input_token_ids, labels)
+        
         batch_size, seq_len = input_token_ids.shape
         
         # ✅ CRITICAL FIX: Add bounds checking to prevent CUDA index out of bounds
@@ -109,15 +123,9 @@ class OpalGPT(nn.Module):
             # Emergency fix: Clamp tokens to valid range
             print(f"   🛡️  EMERGENCY FIX: Clamping tokens to [0, {vocab_size-1}]")
             input_token_ids = torch.clamp(input_token_ids, 0, vocab_size - 1)
-        
-        # Get the token embeddings for the input token IDs
-        #print("Input token IDs shape:", input_token_ids.shape)
-        #print("Token embeddings shape:", self.cfg["vocab_size"], self.cfg["emb_dim"])
-        #print("Input token IDs min:", input_token_ids.min().item(), "max:", input_token_ids.max().item())
 
         tok_embeds = self.token_embeddings(input_token_ids)
         
-        # Get the positional embeddings for the input token IDs
         # ✅ BOUNDS CHECK: Ensure sequence length doesn't exceed context_length
         context_length = self.cfg["context_length"]
         if seq_len > context_length:
@@ -125,12 +133,9 @@ class OpalGPT(nn.Module):
             print(f"   🛡️  EMERGENCY TRUNCATE: Limiting to {context_length}")
             input_token_ids = input_token_ids[:, :context_length]
             seq_len = context_length
-            # Recompute embeddings with truncated input
             tok_embeds = self.token_embeddings(input_token_ids)
         
-        # ✅ BOUNDS CHECK: Validate positional embedding bounds (silent)
         if seq_len > self.positional_embeddings.num_embeddings:
-            # Emergency fix: truncate to max positional embedding size
             max_pos_len = self.positional_embeddings.num_embeddings
             input_token_ids = input_token_ids[:, :max_pos_len]
             seq_len = max_pos_len
@@ -140,23 +145,26 @@ class OpalGPT(nn.Module):
             torch.arange(seq_len, device=input_token_ids.device)
         )
         
-        # Add the token embeddings and positional embeddings
         x = tok_embeds if self.cfg.get("use_rope", True) else (tok_embeds + pos_embeds)
-        
-        # Apply dropout to the embeddings
         x = self.drop_embeddings(x)
         
-        # cache: normalize past_key_values length and structure
+        # ✅ MPS FIX: Ensure proper dtype consistency
+        if input_token_ids.device.type == 'mps':
+            x = x.float()  # Ensure float32 for MPS stability
+        
         if past_key_values is None:
             past_key_values = [(None, None)] * len(self.transformers_block)
 
-        # Pass the embeddings through the transformer blocks
-        # cache: we need to loop blocks to pass per-layer caches in/out (can't call nn.Sequential directly).
         present_key_values = [] if use_cache else None
         
         try:
             for i, block in enumerate(self.transformers_block):
                 pk, pv = past_key_values[i]
+                
+                # ✅ MPS FIX: Synchronize before each attention block
+                if input_token_ids.device.type == 'mps':
+                    torch.mps.synchronize()
+                
                 x, pk_new, pv_new = block(x, past_key=pk, past_value=pv, use_cache=use_cache)
                 
                 if use_cache:
@@ -167,16 +175,17 @@ class OpalGPT(nn.Module):
             print(f"   Error: {e}")
             print(f"   Input shape: {x.shape}")
             print(f"   Block index: {i}")
+            print(f"   Device: {x.device}")
+            if input_token_ids.device.type == 'mps':
+                print(f"   🍎 MPS Error - trying memory cleanup...")
+                if hasattr(torch.mps, 'empty_cache'):
+                    torch.mps.empty_cache()
             raise
         
-        # Apply layer normalization to the output of the transformer blocks
         x = self.final_norm(x)
-        
-        # Get the logits for the output of the final layer normalization
         logits = self.out_head(x)
         
         loss = None
-        # Return the logits
         if labels is not None:
             # ✅ CRITICAL: Check labels bounds before loss calculation to prevent CUDA errors
             vocab_size = self.cfg["vocab_size"]
@@ -188,6 +197,8 @@ class OpalGPT(nn.Module):
                 
                 if labels_max >= vocab_size or labels_min < 0:
                     print(f"🚨 CRITICAL: Labels out of bounds in loss calculation!")
+                    print(f"   Labels range: [{labels_min}, {labels_max}]")
+                    print(f"   Vocab size: {vocab_size}")
                     print(f"   Out-of-bounds count: {(valid_labels >= vocab_size).sum().item()}")
                     print(f"   Negative count: {(valid_labels < 0).sum().item()}")
                     print(f"   🛡️  EMERGENCY CLAMP: Fixing labels before loss calculation")
@@ -198,12 +209,34 @@ class OpalGPT(nn.Module):
                     labels_clamped[valid_mask] = torch.clamp(labels_clamped[valid_mask], 0, vocab_size - 1)
                     labels = labels_clamped
             
+            # ✅ MPS FIX: Ensure loss computation uses proper dtypes
+            if input_token_ids.device.type == 'mps':
+                logits = logits.float()
+                labels = labels.long()
+            
             loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-            # loss = loss_fct(logits.view(-1, self.cfg["vocab_size"]), labels.view(-1))
             loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
 
-        # cache: return present_key_values only when use_cache=True (inference-time)
+        # ✅ MPS FINAL CLEANUP: Post-forward synchronization
+        if input_token_ids.device.type == 'mps':
+            torch.mps.synchronize()
+            
+            # Periodic deep cleanup for long training runs
+            if self._mps_step_counter % (self._mps_memory_cleanup_frequency * 10) == 0:
+                if hasattr(torch.mps, 'empty_cache'):
+                    torch.mps.empty_cache()
+                print(f"🍎 MPS: Deep memory cleanup at step {self._mps_step_counter}")
+        
         if use_cache:
             return {"logits": logits, "loss": loss, "present_key_values": present_key_values}
         else:
             return {"logits": logits, "loss": loss}
+
+    def get_mps_memory_stats(self):
+        """Get MPS memory statistics for debugging."""
+        if hasattr(torch.mps, 'current_allocated_memory'):
+            allocated = torch.mps.current_allocated_memory()
+            return f"MPS Memory: {allocated / 1024**2:.1f} MB"
+        return "MPS Memory: Stats unavailable"
+
+

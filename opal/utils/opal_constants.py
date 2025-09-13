@@ -7,8 +7,8 @@ class OpalConstants:
     LOCAL_TOKENIZER_PATH = f"{LOCAL_CHECKPOINT_PATH}/opal_tokenizer.model"
     
     # RUNTIME PATHS
-    #SYSTEM_ROOT_PATH = "/home/selvaraj/"
-    SYSTEM_ROOT_PATH= ""
+    SYSTEM_ROOT_PATH = "/Users/selvmani/Runs"
+    #SYSTEM_ROOT_PATH= ""
     RUNTIME_ROOT_PATH = f"{SYSTEM_ROOT_PATH}/workspace"
     CHECKPOINT_DIR = f"{RUNTIME_ROOT_PATH}/checkpoints"
     TENSORBOARD_RUN_DIR = f"{CHECKPOINT_DIR}/runs"

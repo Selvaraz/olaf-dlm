@@ -6,6 +6,7 @@ from ..transformer.OpalGPTModel import OpalGPT
 from ..opalmain.opal_trainer import Opal
 from ..utils.opal_constants import OpalConstants
 from ..utils.training_utils import estimate_training_time_from_config
+from ..utils.mps_utils import create_mps_safe_dataloader, mps_safe_optimizer_step, setup_mps_environment
 # from ..config.opal_config import set_finetune_mode
 import time
 import multiprocessing
@@ -23,7 +24,7 @@ print("🔧 Setting fine-tuning mode...")
 # set_finetune_mode(enable_finetune=True)
 
 # 🔧 CRITICAL FIX: Import configs AFTER set_finetune_mode() to get updated values
-from ..config.opal_config import OPAL_MODEL_CONFIG, TRAINING_CONFIG
+from ..config.opal_config import OPAL_MODEL_CONFIG, TRAINING_CONFIG, get_device
 print(f"✅ Configs imported after fine-tuning mode set")
 print(f"   → Learning rate: {OPAL_MODEL_CONFIG['learning_rate']}")
 print(f"   → Batch size: {TRAINING_CONFIG['batch_size']}")
@@ -43,8 +44,7 @@ print(f"   → Checkpoint dir: {OpalConstants.CHECKPOINT_DIR} - {'✅' if os.pat
 # Create checkpoint directory if it doesn't exist
 os.makedirs(OpalConstants.CHECKPOINT_DIR, exist_ok=True)
 
-device = TRAINING_CONFIG["device"]
-print(f"🔧 Using device: {device}")
+device = get_device()
 
 # Note: Opal instance will be created after command line argument parsing
 # to ensure it gets the correct config values
@@ -209,7 +209,6 @@ def model_pretrain_test(start_fresh=False, opal_instance=None):
         import traceback
         traceback.print_exc()
         raise
-
 def parse_arguments():
     """Parse command line arguments for flexible training"""
     parser = argparse.ArgumentParser(description="OPAL Fine-tuning Script for RunPod")
@@ -277,11 +276,21 @@ if __name__ == "__main__":
     print(f"   → Config objects match: {opalInstance.config is OPAL_MODEL_CONFIG}")
     
     # Print startup information
-    print(f"🏃 Running on device: {device}")
+    print(f"🏃 Original device config: {device}")
     print(f"🏃 GPU available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"🏃 GPU device: {torch.cuda.get_device_name()}")
         print(f"🏃 GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    
+    # ✅ MPS SETUP: Use MPS-optimized environment setup for fine-tuning
+    mps_device = setup_mps_environment()
+    print(f"🍎 Using MPS-optimized device: {mps_device}")
+    
+    # Override device in config if MPS is available
+    if mps_device.type == 'mps':
+        TRAINING_CONFIG["device"] = str(mps_device)
+        device = mps_device
+        print(f"✅ Device config updated to: {TRAINING_CONFIG['device']}")
     
     # Run the training
     try:
