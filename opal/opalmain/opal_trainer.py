@@ -1927,7 +1927,6 @@ class Opal:
             print(f"🍎 Apple Silicon MPS device activated for fine-tuning")
             
             # Set optimal MPS settings and environment variables
-            import os
             if 'PYTORCH_MPS_HIGH_WATERMARK_RATIO' not in os.environ:
                 os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.7'
                 print(f"🍎 Set PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.7 for memory management")
