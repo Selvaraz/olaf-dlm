@@ -97,7 +97,7 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
     "attention_drop_rate": 0.1,   # 🔧 Reduced from 0.15
     "qkv_bias": True,
     "num_epoch": 2,               # 🔧 ULTRA-CONSERVATIVE: Reduced from 3 to prevent forgetting
-    "learning_rate": 3e-7,        # 🔧 CRITICAL: Much lower to prevent catastrophic forgetting
+    "learning_rate": 3e-5,        # 🔧 CRITICAL: Much lower to prevent catastrophic forgetting
     "weight_decay": 0.005,        # 🔧 Reduced from 0.01 - minimal regularization
     "warmup_steps": 100,          # 🔧 Adjusted for 2 epochs
     "early_stopping_patience": 1, # 🔧 Very quick stopping if overfitting
