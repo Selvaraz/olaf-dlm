@@ -704,13 +704,23 @@ class Opal:
 
                     global_step += 1
                     
-                    # Generate sample every 1000 iterations to monitor quality (AFTER increment)
-                    # if global_step > 0 and global_step % 1000 == 0:
-                    #     print(f"\n🎯 === GENERATION SAMPLE AT STEP {global_step} ===")
-                    #     self.generate_with_topk(
-                    #         model, tokenizer, device, start_context, top_k=50
-                    #     )
-                    #     print(f"🎯 ============================================\n")
+                    # Generate sample every 2500 iterations to monitor quality (AFTER increment)
+                    if global_step > 0 and global_step % 2500 == 0:
+                        print(f"\n🎯 === GENERATION SAMPLE AT STEP {global_step} ===")
+                        if self.is_finetune:
+                            self.generate_for_finetune(
+                                model, tokenizer, device, start_context
+                            )
+                            # Every few epochs, test generation diversity
+                            if (epoch + 1) % 1 == 0:  # Every epoch
+                                self.improve_generation_diversity(
+                                    model, tokenizer, device, start_context
+                                )
+                        else:
+                            self.generate_with_topk(
+                                model, tokenizer, device, start_context, top_k=50
+                            )
+                        print(f"🎯 ============================================\n")
                     
                     # Update progress bar with accumulated loss
                     if hasattr(loss, 'item'):
@@ -848,7 +858,7 @@ class Opal:
                     model, tokenizer, device, start_context
                 )
                 # Every few epochs, test generation diversity
-                if (epoch + 1) % 3 == 0:  # Every 3rd epoch
+                if (epoch + 1) % 1 == 0:  # Every epoch
                     self.improve_generation_diversity(
                         model, tokenizer, device, start_context
                     )
