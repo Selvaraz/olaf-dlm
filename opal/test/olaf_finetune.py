@@ -282,16 +282,6 @@ if __name__ == "__main__":
         print(f"🏃 GPU device: {torch.cuda.get_device_name()}")
         print(f"🏃 GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     
-    # ✅ MPS SETUP: Use MPS-optimized environment setup for fine-tuning
-    mps_device = setup_mps_environment()
-    print(f"🍎 Using MPS-optimized device: {mps_device}")
-    
-    # Override device in config if MPS is available
-    if mps_device.type == 'mps':
-        TRAINING_CONFIG["device"] = str(mps_device)
-        device = mps_device
-        print(f"✅ Device config updated to: {TRAINING_CONFIG['device']}")
-    
     # Run the training
     try:
         model_pretrain_test(start_fresh=args.start_fresh, opal_instance=opalInstance)

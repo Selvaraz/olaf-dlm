@@ -844,9 +844,9 @@ class Opal:
                 print(f"⛔ Training stopped at epoch {epoch+1}/{num_epochs}")
                 
                 # Export to ONNX even when early stopping
-                self._export_to_onnx(device, val_loader, writer, log_to_wandb)
+                #TODO Temp: self._export_to_onnx(device, val_loader, writer, log_to_wandb)
                 
-                return train_losses, val_losses, track_tokens_seen
+                #TODO Temp: return train_losses, val_losses, track_tokens_seen
 
             # Print a sample text after each epoch
             # self.generate_and_print_sample(
