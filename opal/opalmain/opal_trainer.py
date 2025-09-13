@@ -1779,13 +1779,26 @@ class Opal:
         # ----------------------------------------
         print(f"Creating adaptive optimizer with learning rate: {lr}, {self.config.get('learning_rate', 0)}")
         if self.is_finetune:
-            optimizer = torch.optim.AdamW(betas=(0.9, 0.95), lr=lr, weight_decay=0.1, eps=1e-8)
-            print("🔧 Fine-tuning mode: Using lower learning rate and weight decay")
-            lr = min(lr, 2e-5)  # Use a lower LR for fine-tuning
-            weight_decay = min(weight_decay, 0.01)  # Lower weight decay for fine-tuning
+            decay, no_decay = set(), set()
+            param_dict = {n: p for n, p in model.named_parameters()}
+            for name, p in model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                if name.endswith(".weight") and p.ndim > 1:
+                    decay.add(name)
+                else:
+                    no_decay.add(name) 
+
+            optim_groups = [
+                {"params": [param_dict[n] for n in sorted(decay)], "weight_decay": 0.1},
+                {"params": [param_dict[n] for n in sorted(no_decay)], "weight_decay": 0.0},
+            ]
         else:
-            optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-        
+            adamw_kwargs = dict(betas=(0.9, 0.95), lr=lr, weight_decay=0.0, eps=1e-8)
+            try:
+                optimizer = torch.optim.AdamW(optim_groups, fused=True, **adamw_kwargs)
+            except TypeError:
+                optimizer = torch.optim.AdamW(optim_groups, **adamw_kwargs)
         # 🔧 CRITICAL FIX: For fine-tuning, do NOT load optimizer state to ensure fresh learning rate
         if optimizer_state_dict and not is_finetune:
             print("✅ Loading optimizer state from checkpoint (pretraining mode)")
