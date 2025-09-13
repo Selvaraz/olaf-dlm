@@ -145,7 +145,7 @@ class Opal:
         dataset = OpalFinetuneDataset(
             data=data,
             tokenizer=self.tokenizer,
-            return_weights=True,  # Always return weights for fine-tuning
+            # return_weights=True,  # Always return weights for fine-tuning
             max_length=max_length,
         )
 
