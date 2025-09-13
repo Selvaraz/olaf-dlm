@@ -114,7 +114,7 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
     "eos_id": 2,                   # End of sequence token (matches tokenizer training)
     "unk_id": 3,                    # Unknown token
     "commands_weight": 3.0,       # Weight boost for command tokens in fine-tuning
-    "canary_single_samples": True,  # Enable canary samples for privacy monitoring
+    "canary_single_sample": True,  # Enable canary samples for privacy monitoring
     "canary_steps": 300,
     "canary_index": 0
 
