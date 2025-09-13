@@ -1778,7 +1778,13 @@ class Opal:
         # Optimizer
         # ----------------------------------------
         print(f"Creating adaptive optimizer with learning rate: {lr}, {self.config.get('learning_rate', 0)}")
-        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        if self.is_finetune:
+            optimizer = torch.optim.AdamW(betas=(0.9, 0.95), lr=lr, weight_decay=0.1, eps=1e-8)
+            print("🔧 Fine-tuning mode: Using lower learning rate and weight decay")
+            lr = min(lr, 2e-5)  # Use a lower LR for fine-tuning
+            weight_decay = min(weight_decay, 0.01)  # Lower weight decay for fine-tuning
+        else:
+            optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         
         # 🔧 CRITICAL FIX: For fine-tuning, do NOT load optimizer state to ensure fresh learning rate
         if optimizer_state_dict and not is_finetune:
