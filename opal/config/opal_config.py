@@ -113,10 +113,12 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
     "bos_id": 1,                   # Beginning of sequence token (matches tokenizer training)
     "eos_id": 2,                   # End of sequence token (matches tokenizer training)
     "unk_id": 3,                    # Unknown token
-    "commands_weight": 3.0       # Weight boost for command tokens in fine-tuning
+    "commands_weight": 3.0,       # Weight boost for command tokens in fine-tuning
+    "canary_single_samples": True,  # Enable canary samples for privacy monitoring
+    "canary_steps": 300,
+    "canary_index": 0
+
 }
-
-
 
 _TRAINING_CONFIG_GPU = {
     "device": get_device(),

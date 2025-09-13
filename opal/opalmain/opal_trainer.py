@@ -844,9 +844,9 @@ class Opal:
                 print(f"⛔ Training stopped at epoch {epoch+1}/{num_epochs}")
                 
                 # Export to ONNX even when early stopping
-                #TODO Temp: self._export_to_onnx(device, val_loader, writer, log_to_wandb)
+                self._export_to_onnx(device, val_loader, writer, log_to_wandb)
                 
-                #TODO Temp: return train_losses, val_losses, track_tokens_seen
+                return train_losses, val_losses, track_tokens_seen
 
             # Print a sample text after each epoch
             # self.generate_and_print_sample(
@@ -1694,7 +1694,6 @@ class Opal:
 
     # Train and save model, Main training loop function
     # to train the model from scratch or continue training
-    # or fine-tune the model on a new dataset
     def train_and_save_model(
         self,
         model_class,
@@ -1849,6 +1848,23 @@ class Opal:
             split_idx = int(train_ratio * len(all_data))
             train_data = all_data[:split_idx]
             val_data = all_data[split_idx:]
+
+            # TODO TEMPORARY: Canary single-sample override for quick overfit debugging
+            if self.config.get("canary_single_sample", False) or os.environ.get("OPAL_CANARY_ONE_SAMPLE"):
+                idx = int(self.config.get("canary_index", 0)) if isinstance(self.config.get("canary_index", 0), int) else 0
+                if len(all_data) == 0:
+                    raise ValueError("canary_single_sample set but dataset is empty")
+                sel = all_data[idx % len(all_data)]
+                train_data = [sel]
+                val_data = [sel]
+                # Drive scheduler/warmup by steps: 1 step per epoch with batch=1 → epochs == steps
+                try:
+                    # Rebind the local num_epochs (function arg) to canary_steps
+                    num_epochs = int(self.config.get("canary_steps", 300))
+                except Exception:
+                    num_epochs = 300
+                print(f"🧪 CANARY MODE: training on one sample (index={idx}) for {num_epochs} steps (epochs).")
+                print(f"🧪 Prompt preview: {sel.get('prompt','')[:120]!r}")
             
             print(f"📊 Data split: {len(train_data)} train, {len(val_data)} validation samples")
             
