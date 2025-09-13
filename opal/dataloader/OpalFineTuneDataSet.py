@@ -90,6 +90,19 @@ class OpalFinetuneDataset(Dataset):
         for rec in self.data:
             prompt = rec.get("prompt", "") or ""
             response = rec.get("response", "") or ""
+            
+            # Ensure prompt and response are strings
+            if not isinstance(prompt, str):
+                if isinstance(prompt, dict):
+                    prompt = json.dumps(prompt) if prompt else ""
+                else:
+                    prompt = str(prompt) if prompt else ""
+            
+            if not isinstance(response, str):
+                if isinstance(response, dict):
+                    response = json.dumps(response) if response else ""
+                else:
+                    response = str(response) if response else ""
 
             # Ensure tags are present in reasonable shape
             if not prompt.startswith(self.USER_OPEN):
