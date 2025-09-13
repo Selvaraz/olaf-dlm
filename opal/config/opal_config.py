@@ -122,7 +122,7 @@ _GPT_CONFIG_OPAL_FINETUNE_45M = {
 
 _TRAINING_CONFIG_GPU = {
     "device": get_device(),
-    "batch_size": 4,              # 🔧 Even smaller batches for ultra-conservative training
+    "batch_size": 1,              # 🔧 Even smaller batches for ultra-conservative training
     "num_workers": 2,             # 🔧 Reduced further for stability
     "mixed_precision": True,     # 🔧 Disabled for fine-tuning stability
     "gradient_accumulation_steps": 4  # 🔧 Matches model config for effective batch size 32
