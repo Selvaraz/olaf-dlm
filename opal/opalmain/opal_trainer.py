@@ -1777,6 +1777,7 @@ class Opal:
         # ----------------------------------------
         # Optimizer
         # ----------------------------------------
+        optimizer = None
         print(f"Creating adaptive optimizer with learning rate: {lr}, {self.config.get('learning_rate', 0)}")
         if self.is_finetune:
             decay, no_decay = set(), set()
