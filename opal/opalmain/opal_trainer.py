@@ -761,8 +761,14 @@ class Opal:
                 # Evaluation - only check on actual weight update steps
                 if is_accumulation_step or is_last_batch:
                     # Adaptive evaluation frequency for pretraining vs fine-tuning
-                    eval_frequency = eval_freq if not self.is_finetune else max(eval_freq * 4, 100)
+                    eval_frequency = eval_freq if not self.is_finetune else max(eval_freq, 10)  # 🔧 FIXED: Lower eval freq for fine-tuning
+                    
+                    # 🔧 DEBUG: Log evaluation frequency once
+                    if global_step == 1:
+                        print(f"📊 Evaluation frequency set to: {eval_frequency} steps")
+                    
                     if global_step % eval_frequency == 0 and global_step > 0:
+                        print(f"📊 === STEP-BASED EVALUATION AT STEP {global_step} ===")
                         train_loss, val_loss = self.evaluate_model(
                             model, train_loader, val_loader, device, eval_iter)
                         train_losses.append(train_loss)
@@ -837,6 +843,25 @@ class Opal:
                                 "step": global_step,
                                 "mode": "finetune" if self.is_finetune else "pretrain"
                             })
+
+            # 🔧 FORCED EVALUATION: Ensure evaluation happens at least once per epoch
+            print(f"\n📊 === FORCED END-OF-EPOCH EVALUATION ===")
+            train_loss, val_loss = self.evaluate_model(
+                model, train_loader, val_loader, device, eval_iter)
+            train_losses.append(train_loss)
+            val_losses.append(val_loss)
+            track_tokens_seen.append(tokens_seen)
+            
+            # Update best validation loss if improved
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                print(f"🎉 NEW BEST VALIDATION LOSS: {best_val_loss:.6f}")
+                
+                # Save checkpoint when validation improves
+                checkpoint_path = self.save_model_checkpoint(
+                    self.config, model, optimizer, scheduler, epoch, 
+                    train_losses, val_losses, tokenizer.model_file if hasattr(tokenizer, 'model_file') else None)
+                print(f"💾 Checkpoint saved: {checkpoint_path}")
 
             # ✅ After each epoch, check if val_loss improved in this epoch
             epoch_duration = time.time() - epoch_start_time
@@ -1816,15 +1841,26 @@ class Opal:
             random.seed(42)  # Deterministic split
             random.shuffle(all_data)  # Shuffle before split
             
-            split_idx = int(train_ratio * len(all_data))
+            # 🔧 FIXED: Ensure minimum validation size for small datasets
+            min_val_samples = 10  # Minimum validation samples
+            if len(all_data) < min_val_samples * 2:  # Too small for proper split
+                print(f"⚠️ WARNING: Dataset too small ({len(all_data)} samples). Using 20% for validation.")
+                split_idx = max(1, int(train_ratio * len(all_data)))
+            else:
+                split_idx = int(train_ratio * len(all_data))
+                # Ensure validation set has at least min_val_samples
+                if (len(all_data) - split_idx) < min_val_samples:
+                    split_idx = len(all_data) - min_val_samples
+            
             train_data = all_data[:split_idx]
             val_data = all_data[split_idx:]
 
             print(f"📊 Data split: {len(train_data)} train, {len(val_data)} validation samples")
             
-            # 🔧 Ensure validation set is not too small
-            if len(val_data) < 100:
-                print(f"⚠️ WARNING: Validation set very small ({len(val_data)} samples). Consider larger dataset or different split ratio.")
+            # 🔧 Enhanced validation set size check
+            if len(val_data) < 5:
+                print(f"❌ CRITICAL: Validation set too small ({len(val_data)} samples). Need at least 5 samples for reliable evaluation.")
+                raise ValueError("Validation set too small for reliable evaluation")
     
             # Create temporary files for split data
             with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as train_file:
