@@ -138,7 +138,7 @@ _TRAINING_CONFIG_MPS = {
     'use_gradient_checkpointing': True,  # Enable gradient checkpointing
 }
 
-OPAL_MODEL_CONFIG = _GPT_CONFIG_OPAL_FINETUNE_45M
+OPAL_MODEL_CONFIG = GPT_CONFIG_OPAL_FINETUNE_45M
 
 # Automatically select configuration based on device
 if torch.backends.mps.is_available():
