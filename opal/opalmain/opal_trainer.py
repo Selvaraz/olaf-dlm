@@ -787,10 +787,19 @@ class Opal:
                         if val_loss < best_val_loss:
                             best_val_loss = val_loss
                             print(f"🔥 New best val_loss {val_loss:.6f}! Saving checkpoint...")
+                            # Try to get tokenizer model path
+                            tokenizer_model_path = None
+                            if hasattr(tokenizer, 'model_file') and tokenizer.model_file:
+                                tokenizer_model_path = tokenizer.model_file
+                            elif hasattr(tokenizer, 'model_path') and tokenizer.model_path:
+                                tokenizer_model_path = tokenizer.model_path
+                            else:
+                                tokenizer_model_path = OpalConstants.TOKENIZER_MODEL_PATH
+                            
                             self.save_model_checkpoint(
                                 self.config, model, optimizer, scheduler,
                                 epoch, train_losses, val_losses,
-                                tokenizer_model=OpalConstants.TOKENIZER_MODEL_PATH
+                                tokenizer_model_path
                             )
                         else:
                             print(f"⚠️ No improvement (current: {val_loss:.6f}, best: {best_val_loss:.6f})")
@@ -858,9 +867,18 @@ class Opal:
                 print(f"🎉 NEW BEST VALIDATION LOSS: {best_val_loss:.6f}")
                 
                 # Save checkpoint when validation improves
+                # Try to get tokenizer model path from various sources
+                tokenizer_model_path = None
+                if hasattr(tokenizer, 'model_file') and tokenizer.model_file:
+                    tokenizer_model_path = tokenizer.model_file
+                elif hasattr(tokenizer, 'model_path') and tokenizer.model_path:
+                    tokenizer_model_path = tokenizer.model_path
+                elif hasattr(self.tokenizer, 'model_file') and self.tokenizer.model_file:
+                    tokenizer_model_path = self.tokenizer.model_file
+                
                 checkpoint_path = self.save_model_checkpoint(
                     self.config, model, optimizer, scheduler, epoch, 
-                    train_losses, val_losses, tokenizer.model_file if hasattr(tokenizer, 'model_file') else None)
+                    train_losses, val_losses, tokenizer_model_path)
                 print(f"💾 Checkpoint saved: {checkpoint_path}")
 
             # ✅ After each epoch, check if val_loss improved in this epoch
@@ -1381,9 +1399,16 @@ class Opal:
         
         torch.save(checkpoint, checkpoint_path)
 
-        # Copy the tokenizer model to the checkpoint directory
-        tokenizer_model_path = os.path.join(checkpoint_dir, "opal_tokenizer.model")
-        shutil.copyfile(tokenizer_model, tokenizer_model_path)
+        # Copy the tokenizer model to the checkpoint directory (if available)
+        if tokenizer_model and os.path.exists(tokenizer_model):
+            tokenizer_model_path = os.path.join(checkpoint_dir, "opal_tokenizer.model")
+            try:
+                shutil.copyfile(tokenizer_model, tokenizer_model_path)
+                print(f"✅ Tokenizer model copied to checkpoint directory")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not copy tokenizer model: {e}")
+        else:
+            print(f"⚠️ Warning: Tokenizer model path not provided or doesn't exist, skipping copy")
 
         #print(f"Model checkpoint saved to {checkpoint_path}")
         # Create a symlink to the latest checkpoint
