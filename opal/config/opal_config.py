@@ -98,7 +98,7 @@ GPT_CONFIG_OPAL_FINETUNE_45M = {
     "qkv_bias": True,
     "num_epoch": 2,                  # OK (use steps-based stopping if possible)
     # ↓ LR & scheduling
-    "learning_rate": 2e-6,           # was 2e-5
+    "learning_rate": 2e-7,           # was 2e-5
     "weight_decay": 0.005,
     "warmup_steps": None,            # use ratio in trainer (see below)
     "warmup_ratio": 0.04,            # 4% of total steps
