@@ -108,7 +108,7 @@ class Opal:
         batch_size: int = None,
         max_length: int = 512,
         shuffle: bool = True,
-        drop_last: bool = True,
+        drop_last: bool = False,
         num_workers: int = 0,
     ):
         """
@@ -140,18 +140,32 @@ class Opal:
                     print(f"⚠ Skipping malformed JSONL line: {line[:50]}...")  # Review-1: Added malformed line handling
 
         print(f"📄 Loaded {len(data)} fine-tuning samples from {data_jsonl}")
+        # SFT: Verion_1.0 — robust batch sizing for tiny datasets
+        dataset_len = len(data)
+        if dataset_len == 0:
+            raise RuntimeError(f"SFT dataset at {data_jsonl} is empty.")
+
 
         # Create dataset
         dataset = OpalFinetuneDataset(
             data=data,
             tokenizer=self.tokenizer,
-            # return_weights=True,  # Always return weights for fine-tuning
+            return_weights=True,  # Always return weights for fine-tuning
             max_length=max_length,
         )
 
         # Set batch size
         if batch_size is None:
             batch_size = TRAINING_CONFIG.get("batch_size", 4)
+
+        
+        # SFT: Verion_1.0 — avoid empty DataLoader when batch_size > dataset_len
+        if batch_size is None:
+            batch_size = TRAINING_CONFIG.get("batch_size", 4)
+        if batch_size > len(dataset):
+            print(f"⚠️ SFT: Adjusting batch_size {batch_size} → {len(dataset)} to avoid empty DataLoader when drop_last=True")
+            batch_size = len(dataset)
+            drop_last = False
 
         print(f"✅ Creating Fine-tune DataLoader → batch_size={batch_size}, shuffle={shuffle}, workers={num_workers}")
 
@@ -567,12 +581,12 @@ class Opal:
 
         # FINETUNE_PH2: Adaptive Warmup - both pretraining and fine-tuning benefit from warmup
         # Adjust total steps for gradient accumulation
-        steps_per_epoch = len(train_loader) // gradient_accumulation_steps
+        steps_per_epoch = max(1, len(train_loader) // max(1, gradient_accumulation_steps))  # SFT: Verion_1.0 guard
         total_steps = num_epochs * steps_per_epoch
         if self.is_finetune:
             # Fine-tuning: lighter warmup (2% of total steps or configured warmup_steps)
             #warmup_steps = min(self.config.get("warmup_steps", int(total_steps * 0.02)), int(total_steps * 0.1))
-            warmup_steps =  int(total_steps * 0.03)
+            warmup_steps = max(1, int(total_steps * 0.03))  # SFT: Verion_1.0
         else:
             # Pretraining: standard warmup (5% of total steps)
             warmup_steps = int(total_steps * 0.05)
@@ -580,11 +594,13 @@ class Opal:
         print(f"🚀 === TRAINING PIPELINE INITIALIZATION ===")
         print(f"📊 Mode: {'FINE-TUNING' if self.is_finetune else 'PRETRAINING'}")
         print(f"📊 Training setup: {total_steps:,} total steps, {warmup_steps:,} warmup steps")
-        print(f"📊 Epochs: {num_epochs}, Batches per epoch: {len(train_loader):,}")
+        print(f"📊 Epochs: {num_epochs}, Batches per epoch: {len(train_loader):,}")  # SFT: Verion_1.0
         print(f"📊 Effective batches per epoch (with accumulation): {steps_per_epoch:,}")
-        print(f"📊 Batch size: {len(train_loader.dataset) // len(train_loader)}")
+        bs_est = (len(train_loader.dataset) // len(train_loader)) if len(train_loader) > 0 else len(train_loader.dataset)
+        print(f"📊 Batch size (est): {bs_est}")  # SFT: Verion_1.0
         print(f"📊 Gradient accumulation steps: {gradient_accumulation_steps}")
-        print(f"📊 Effective batch size: {(len(train_loader.dataset) // len(train_loader)) * gradient_accumulation_steps}")
+        eff_bs = bs_est * max(1, gradient_accumulation_steps)
+        print(f"📊 Effective batch size: {eff_bs}")  # SFT: Verion_1.0
         print(f"📊 Evaluation frequency: every {eval_freq} steps, {eval_iter} batches per eval")
         print(f"📊 Early stopping patience: {early_stopping_patience} epochs")
         print(f"📊 Mixed precision: {use_mixed_precision}")
@@ -1175,93 +1191,48 @@ class Opal:
             raise ValueError(f"Shape mismatch. Left: {left.shape}, Right: {right.shape}")
         return torch.nn.Parameter(torch.tensor(right))
     
+    
     def calc_loss_batch(self, input_batch, target_batch, weights, model, device):
         """
-        Compute the loss for a single batch during training.
+        # SFT: Verion_1.0
+        Compute a WEIGHTED cross-entropy loss for a single batch.
 
-        Reads the input and target tensors, moves them to the specified device,
-        and computes the loss using the model's forward method.
-
-        Args:
-            input_batch (torch.Tensor): Input tensor batch (e.g., token IDs).
-            target_batch (torch.Tensor): Target tensor batch (e.g., labels).
-            model (torch.nn.Module): The model used for training.
-            device (str): The device to perform the computation on ('cpu' or 'cuda').
-
-        Returns:
-            torch.Tensor: The computed loss value.
+        • Uses ignore_index=-100 to mask prompt tokens.
+        • Multiplies token losses by `weights` (e.g., CODE up-weighting).
+        • Normalizes by the number of valid (non-masked) tokens to keep scale stable.
         """
-
-        # Move inputs to the correct device
+        # Move inputs
         input_batch = input_batch.to(device)
         target_batch = target_batch.to(device)
         weights = weights.to(device) if weights is not None else None
 
-        # 1️⃣ Forward pass: Let the model compute logits and loss
-        # If labels are provided, the model itself computes loss (with ignore_index=-100)
-        
-        model_output = model(input_batch, labels=target_batch)
+        # Forward pass
+        out = model(input_batch, labels=None)  # we will compute loss manually for weights
+        logits = out["logits"] if isinstance(out, dict) else out[0] if isinstance(out, (tuple, list)) else out
 
-        # 2️⃣ Extract loss properly
-        if isinstance(model_output, dict):
-            # Preferred path – model returns {"logits": ..., "loss": ...}
-            loss = model_output.get("loss", None)
-            if loss is None:
-                # Fallback if loss not computed in forward()
-                logits = model_output["logits"]
-                
-                # ✅ CRITICAL DEBUG: Check logits dimensions before loss computation
-                print(f"🔍 Loss computation debug:")
-                print(f"   Logits shape: {logits.shape}")
-                print(f"   Target shape: {target_batch.shape}")
-                print(f"   Logits vocab dimension: {logits.size(-1)}")
-                print(f"   Expected vocab size: {self.config.get('vocab_size', 'MISSING')}")
-                print(f"   Target range: [{target_batch.min().item()}, {target_batch.max().item()}]")
-                
-                # Check if vocab dimensions match
-                expected_vocab = self.config.get('vocab_size', 12000)
-                actual_vocab = logits.size(-1)
-                B, T, V = logits.size()
-                logits_flat = logits.reshape(B*T, V)
-                labels_flat = target_batch.reshape(B*T)
-                weights_flat = weights.reshape(B*T)
+        # Shapes
+        B, T, V = logits.size()
+        logits = logits.view(B*T, V)
+        targets = target_batch.view(B*T)
 
-                if actual_vocab != expected_vocab:
-                    print(f"🚨 CRITICAL MISMATCH: Logits vocab={actual_vocab} != expected={expected_vocab}")
-                    print(f"   This indicates model was trained with different vocab size!")
-                    print(f"   🛡️  EMERGENCY: Cannot fix vocab size mismatch at runtime")
-                    raise ValueError(f"Model vocab size mismatch: {actual_vocab} vs {expected_vocab}")
-                
-                #loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
-                per_tok = F.cross_entropy(logits_flat, labels_flat, reduction='none', ignore_index=-100)
-                valid = (labels_flat != -100).float()
-                w = torch.where(valid > 0, weights_flat, torch.zeros_like(weights_flat))
-                denom = torch.clamp(w.sum(), min=1.0)
-                loss = (per_tok * w).sum() / denom
-                #loss = loss_fct(logits.view(-1, logits.size(-1)), target_batch.view(-1))
+        # Build base per-token loss (no reduction)
+        ce = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
+        per_tok_loss = ce(logits, targets)  # shape [B*T]
+
+        # Apply weights to non-masked region
+        if weights is None:
+            # If no weights provided, default weight=1.0 on non-masked tokens
+            valid = (targets != -100).float()
+            loss = (per_tok_loss * valid).sum() / (valid.sum().clamp_min(1.0))
         else:
-            # If model returns only logits (legacy behavior)
-            logits = model_output
-            
-            # ✅ CRITICAL DEBUG: Check logits dimensions before loss computation  
-            print(f"🔍 Loss computation debug (legacy path):")
-            print(f"   Logits shape: {logits.shape}")
-            print(f"   Target shape: {target_batch.shape}")
-            print(f"   Logits vocab dimension: {logits.size(-1)}")
-            print(f"   Expected vocab size: {self.config.get('vocab_size', 'MISSING')}")
-            print(f"   Target range: [{target_batch.min().item()}, {target_batch.max().item()}]")
-            
-            # Check if vocab dimensions match
-            expected_vocab = self.config.get('vocab_size', 12000)
-            actual_vocab = logits.size(-1)
-            if actual_vocab != expected_vocab:
-                print(f"🚨 CRITICAL MISMATCH: Logits vocab={actual_vocab} != expected={expected_vocab}")
-                raise ValueError(f"Model vocab size mismatch: {actual_vocab} vs {expected_vocab}")
-            
-            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
-            loss = loss_fct(logits.view(-1, logits.size(-1)), target_batch.view(-1))
+            w = weights.view(B*T).to(per_tok_loss.dtype)
+            # Zero weights where labels are masked
+            valid = (targets != -100).float()
+            w = w * valid
+            loss = (per_tok_loss * w).sum() / (w.sum().clamp_min(1.0))
 
         return loss
+
 
 
 
@@ -1295,8 +1266,8 @@ class Opal:
                 # Handle both 2-value and 3-value returns from dataset
                 if len(batch) == 3:
                     input_batch, target_batch, weights = batch
-                    # For now, ignore weights in loss calculation during evaluation
-                    loss = self.calc_loss_batch(input_batch, target_batch, None, model, device)
+                    # Use weights in evaluation for consistent metric calculation
+                    loss = self.calc_loss_batch(input_batch, target_batch, weights, model, device)
                 elif len(batch) == 2:
                     input_batch, target_batch = batch
                     loss = self.calc_loss_batch(input_batch, target_batch, None, model, device)
@@ -1849,23 +1820,6 @@ class Opal:
             train_data = all_data[:split_idx]
             val_data = all_data[split_idx:]
 
-            # TODO TEMPORARY: Canary single-sample override for quick overfit debugging
-            if self.config.get("canary_single_sample", False) or os.environ.get("OPAL_CANARY_ONE_SAMPLE"):
-                idx = int(self.config.get("canary_index", 0)) if isinstance(self.config.get("canary_index", 0), int) else 0
-                if len(all_data) == 0:
-                    raise ValueError("canary_single_sample set but dataset is empty")
-                sel = all_data[idx % len(all_data)]
-                train_data = [sel]
-                val_data = [sel]
-                # Drive scheduler/warmup by steps: 1 step per epoch with batch=1 → epochs == steps
-                try:
-                    # Rebind the local num_epochs (function arg) to canary_steps
-                    num_epochs = int(self.config.get("canary_steps", 300))
-                except Exception:
-                    num_epochs = 300
-                print(f"🧪 CANARY MODE: training on one sample (index={idx}) for {num_epochs} steps (epochs).")
-                print(f"🧪 Prompt preview: {sel.get('prompt','')[:120]!r}")
-            
             print(f"📊 Data split: {len(train_data)} train, {len(val_data)} validation samples")
             
             # 🔧 Ensure validation set is not too small
@@ -1894,6 +1848,7 @@ class Opal:
                 shuffle=True,
                 num_workers=safe_num_workers  # 🚨 Force 0 for fine-tuning
             )
+            # SFT: Verion_1.0 — create val loader (may be None/empty for tiny sets)
             val_loader = self.createOpalFinetuneDataLoader(
                 data_jsonl=val_file_path,
                 batch_size=batch_size,

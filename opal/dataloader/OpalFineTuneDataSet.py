@@ -1,15 +1,31 @@
-
-import json
+# SFT: Verion_1.0
+# OpalFineTuneDataSet.py — complete, production-ready SFT dataset class
+# -------------------------------------------------------------------
+# Expectations:
+# - Each JSONL record is a dict with string fields:
+#       {"prompt": "<QUESTION>…</QUESTION>", "response": "<RESPONSE>…</RESPONSE>"}
+# - We concatenate prompt + response to form the training text.
+# - Labels: mask the prompt; learn only on the response.
+# - Weights: up-weight tokens inside <CODE>…</CODE> (optionally wrapped in <CONFIG>…</CONFIG>).
+# - SentencePiece tokenizer is used (no offset API); we map char→token by encoding prefixes.
+# - Newline sentinel: inside <CODE>, you may use <NL>. We do not alter it; you can post-process
+#   generated text to replace <NL> with '\n' for display.
+#
+# Notes:
+# - This class does NOT json-dump the response; it consumes the strings you parsed from JSONL.
+# - It is robust to short samples and respects max_length with careful trimming so the assistant
+#   portion remains learnable.
+#
+# Usage:
+#   ds = OpalFinetuneDataset(records, sp_tokenizer, max_length=1024, code_weight=3.0)
+#   ids, labels, weights = ds[i]
+#
 from typing import List, Dict, Tuple
 import torch
 from torch.utils.data import Dataset
+import re
 
 class OpalFinetuneDataset(Dataset):
-    """
-    Patched to support QUESTION/RESPONSE schema (no JSON wrapping) and apply
-    token-space weighting for <CONFIG>/<CODE>/backticks even when tags are split
-    across multiple SentencePiece pieces.
-    """
     def __init__(
         self,
         data: List[Dict],
@@ -20,14 +36,11 @@ class OpalFinetuneDataset(Dataset):
         pad_id: int = 0,
         bos_id: int = 1,
         eos_id: int = 2,
-        base_asst_weight: float = 1.0,
-        code_weight: float = 2.0,
-        config_weight: float = 3.0,
-        summary_weight: float = 0.9,
-        desc_weight: float = 0.9,
-        treat_ticks_like_code: bool = True,
+        code_weight: float = 3.0,
+        config_wrap_bonus: float = 1.25,   # multiplies weights if <CODE> is inside <CONFIG>
+        ticks_weight: float = 1.0,         # reserved for ``` blocks (not used by default)
+        return_weights: bool = True,
     ) -> None:
-        self.data = data
         self.tok = tokenizer
         self.max_length = int(max_length)
         self.add_bos = bool(add_bos)
@@ -35,159 +48,142 @@ class OpalFinetuneDataset(Dataset):
         self.pad_id = int(pad_id)
         self.bos_id = int(bos_id)
         self.eos_id = int(eos_id)
+        self.code_w = float(code_weight)
+        self.cfg_bonus = float(config_wrap_bonus)
+        self.ticks_w = float(ticks_weight)
+        self.return_weights = bool(return_weights)
 
-        self.base_asst_weight = float(base_asst_weight)
-        self.code_weight = float(code_weight)
-        self.config_weight = float(config_weight)
-        self.summary_weight = float(summary_weight)
-        self.desc_weight = float(desc_weight)
-        self.treat_ticks_like_code = bool(treat_ticks_like_code)
+        # Cache list of (full_text, assistant_char_start, response_text)
+        self.recs: List[Tuple[str, int, str]] = []
+        for obj in data:
+            prompt = obj.get("prompt", "")
+            response = obj.get("response", "")
+            if not isinstance(prompt, str) or not isinstance(response, str):
+                continue
+            full = f"{prompt}{response}"
+            asst_char_start = len(prompt)
+            self.recs.append((full, asst_char_start, response))
 
-        # Tags
-        self.QO, self.QC = "<QUESTION>", "</QUESTION>"
-        self.RO, self.RC = "<RESPONSE>", "</RESPONSE>"
-        self.CODE_O, self.CODE_C = "<CODE>", "</CODE>"
-        self.CONFIG_O, self.CONFIG_C = "<CONFIG>", "</CONFIG>"
-        self.SUMMARY_O, self.SUMMARY_C = "<SUMMARY>", "</SUMMARY>"
-        self.DESC_O, self.DESC_C = "<DESCRIPTION>", "</DESCRIPTION>"
+    def __len__(self) -> int:
+        return len(self.recs)
 
-        # Pre-encode tag patterns once (as id sequences; tags may be split)
-        def enc(s): 
-            try: return self.tok.encode(s, out_type=int)
-            except Exception: return self.tok.EncodeAsIds(s)
-        self._pat = {
-            "CODE_O": enc(self.CODE_O), "CODE_C": enc(self.CODE_C),
-            "CONFIG_O": enc(self.CONFIG_O), "CONFIG_C": enc(self.CONFIG_C),
-            "SUMMARY_O": enc(self.SUMMARY_O), "SUMMARY_C": enc(self.SUMMARY_C),
-            "DESC_O": enc(self.DESC_O), "DESC_C": enc(self.DESC_C),
-            "RO": enc(self.RO), "RC": enc(self.RC),
-        }
+    # ----------------- helpers -----------------
+    def _sp_encode(self, text: str):
+        """Encode with SentencePiece -> token ids."""
+        return self.tok.encode(text, out_type=int)
 
-        # Build samples
-        self.samples = []
-        for i, rec in enumerate(self.data):
-            prompt = (rec.get("prompt") or "").strip()
-            response = rec.get("response")
-            # If response is structured (dict), turn into a simple Q/R body; else assume it's already tagged
-            if isinstance(response, dict):
-                # Best-effort stringify
-                body = json.dumps(response, ensure_ascii=False)
-                response_text = f"{self.RO}\n{body}\n{self.RC}"
+    def _char_to_tok(self, full: str, char_pos: int) -> int:
+        """
+        Map a character position in `full` to a token index by encoding the prefix full[:char_pos].
+        """
+        if char_pos <= 0:
+            return 0
+        if char_pos >= len(full):
+            return len(self._sp_encode(full))
+        prefix = full[:char_pos]
+        return len(self._sp_encode(prefix))
+
+    def _find_code_char_spans(self, response: str):
+        """
+        Find code spans in response. Returns list of (start_char, end_char, wrapped_in_config),
+        positions are relative to the start of the response string.
+        """
+        spans = []
+        # First, code blocks inside CONFIG
+        for cfg in re.finditer(r"<CONFIG>(.*?)</CONFIG>", response, flags=re.DOTALL | re.IGNORECASE):
+            inner = cfg.group(1)
+            cfg_base = cfg.start(1)
+            for m in re.finditer(r"<CODE>(.*?)</CODE>", inner, flags=re.DOTALL | re.IGNORECASE):
+                s = cfg_base + m.start(1)
+                e = cfg_base + m.end(1)
+                spans.append((s, e, True))
+        # Bare code blocks not already accounted for
+        for m in re.finditer(r"<CODE>(.*?)</CODE>", response, flags=re.DOTALL | re.IGNORECASE):
+            s = m.start(1); e = m.end(1)
+            # Check overlap with existing
+            if not any(s >= s0 and e <= e0 for (s0, e0, _) in spans):
+                spans.append((s, e, False))
+        return spans
+
+    # ----------------- main item build -----------------
+    def __getitem__(self, idx: int):
+        full, asst_char_start, response = self.recs[idx]
+
+        # Encode *without* BOS/EOS first so we can map char→token accurately
+        ids_no_be = self._sp_encode(full)
+        asst_tok_start_no_be = self._char_to_tok(full, asst_char_start)
+
+        # Map all code spans to token spans (exclusive end), BEFORE BOS/EOS
+        code_spans_tok = []  # (tok_start, tok_end, factor)
+        for (rel_s, rel_e, wrapped) in self._find_code_char_spans(response):
+            abs_s = asst_char_start + rel_s
+            abs_e = asst_char_start + rel_e
+            tok_s = self._char_to_tok(full, abs_s)
+            tok_e = self._char_to_tok(full, abs_e)
+            factor = self.code_w * (self.cfg_bonus if wrapped else 1.0)
+            code_spans_tok.append((tok_s, tok_e, factor))
+
+        # Now add BOS/EOS and compute final ids
+        ids = ids_no_be[:]
+        asst_tok_start = asst_tok_start_no_be
+        bos_offset = 1 if self.add_bos else 0
+        if self.add_bos:
+            ids = [self.bos_id] + ids
+            asst_tok_start = asst_tok_start_no_be + 1
+        if self.add_eos:
+            ids = ids + [self.eos_id]
+
+        # Shift code spans by BOS offset
+        code_spans_tok = [(s + bos_offset, e + bos_offset, f) for (s, e, f) in code_spans_tok]
+
+        # Truncate with head-trim that preserves assistant
+        if len(ids) > self.max_length:
+            overflow = len(ids) - self.max_length
+            head_keep = 1 if self.add_bos else 0
+            # Trim as much as we can from prompt segment (head), but not past assistant start
+            max_head_trim = max(0, asst_tok_start - head_keep)
+            trim_from_head = min(overflow, max_head_trim)
+            head_removed = trim_from_head
+            if trim_from_head > 0:
+                ids = ids[:head_keep] + ids[head_keep + trim_from_head:]
+                asst_tok_start -= trim_from_head
+                # Shift code spans left
+                shifted_spans = []
+                for (s, e, f) in code_spans_tok:
+                    shifted_spans.append((max(head_keep, s - head_removed), max(head_keep, e - head_removed), f))
+                code_spans_tok = shifted_spans
+            # Final tail cut if still long
+            if len(ids) > self.max_length:
+                ids = ids[: self.max_length]
+                # Clip code spans to max_length
+                code_spans_tok = [(s, min(e, self.max_length), f) for (s, e, f) in code_spans_tok]
+                asst_tok_start = min(asst_tok_start, self.max_length - 1)
+
+        # Build labels (prompt masked)
+        labels = [-100] * len(ids)
+        for j in range(asst_tok_start, len(ids)):
+            labels[j] = ids[j]
+
+        # Base weights: 0 for prompt, 1 for response
+        weights = [0.0] * asst_tok_start + [1.0] * (len(ids) - asst_tok_start)
+
+        # Apply code multipliers
+        for (ts, te, factor) in code_spans_tok:
+            ts = max(ts, asst_tok_start)
+            te = min(te, len(ids))
+            if ts < te:
+                for k in range(ts, te):
+                    weights[k] *= factor
+
+        # Align lengths
+        if len(weights) != len(ids):
+            if len(weights) < len(ids):
+                weights = weights + [weights[-1] if weights else 1.0] * (len(ids) - len(weights))
             else:
-                response_text = (response or "").strip()
-                # Ensure we have RESPONSE wrapper
-                if not response_text.startswith(self.RO):
-                    response_text = f"{self.RO}\n{response_text}"
-                if not response_text.endswith(self.RC):
-                    response_text = f"{response_text}\n{self.RC}"
+                weights = weights[: len(ids)]
 
-            user_text = prompt
-            if not user_text.startswith(self.QO):
-                user_text = f"{self.QO} {user_text}"
-            if not user_text.endswith(self.QC):
-                user_text = f"{user_text} {self.QC}"
-            user_text = user_text + "\\n"
-
-            full_text = user_text + response_text
-
-            # Tokenize
-            try:
-                ids = self.tok.encode(full_text, out_type=int)
-                user_ids = self.tok.encode(user_text, out_type=int)
-            except Exception:
-                ids = self.tok.EncodeAsIds(full_text)
-                user_ids = self.tok.EncodeAsIds(user_text)
-
-            # Truncate from the left of prompt region only
-            asst_tok_start = len(user_ids)
-            max_len_raw = self.max_length - (1 if self.add_bos else 0) - (1 if self.add_eos else 0)
-            if len(ids) > max_len_raw:
-                overflow = len(ids) - max_len_raw
-                cut = min(overflow, asst_tok_start)  # only eat prompt
-                if cut > 0:
-                    ids = ids[cut:]
-                    asst_tok_start -= cut
-                    if asst_tok_start < 0: asst_tok_start = 0
-
-            # Add BOS/EOS
-            if self.add_bos:
-                ids = [self.bos_id] + ids
-                asst_tok_start += 1
-            if self.add_eos:
-                ids = ids + [self.eos_id]
-
-            # Labels: learn response (including <RESPONSE> tags)
-            labels = [-100] * len(ids)
-            for j in range(asst_tok_start, len(ids)):
-                labels[j] = ids[j]
-
-            # Base weights
-            weights = [0.0] * asst_tok_start + [self.base_asst_weight] * (len(ids) - asst_tok_start)
-
-            # Weight code/config/summary/desc using token patterns (fast, robust even if tags are split)
-            def find_all(hay: List[int], needle: List[int]) -> List[int]:
-                if not needle: return []
-                L, N = len(hay), len(needle)
-                out = []
-                for k in range(L - N + 1):
-                    if hay[k:k+N] == needle:
-                        out.append(k)
-                return out
-
-            # response region ids (after asst start)
-            resp_ids = ids[asst_tok_start:]
-            Lresp = len(resp_ids)
-
-            def spans_from_tags(open_pat_key: str, close_pat_key: str):
-                os = find_all(resp_ids, self._pat[open_pat_key])
-                cs = find_all(resp_ids, self._pat[close_pat_key])
-                cs_iter = iter(cs)
-                spans = []
-                cur_c = next(cs_iter, None)
-                for o in os:
-                    while cur_c is not None and cur_c <= o:
-                        cur_c = next(cs_iter, None)
-                    if cur_c is None:
-                        break
-                    spans.append((o + len(self._pat[open_pat_key]), cur_c))  # inside content
-                return spans
-
-            # CODE blocks
-            for s,e in spans_from_tags("CODE_O", "CODE_C"):
-                s_abs, e_abs = asst_tok_start + s, asst_tok_start + e
-                for t in range(s_abs, min(e_abs, len(weights))):
-                    weights[t] *= self.code_weight
-
-            # SUMMARY / DESCRIPTION (milder weight)
-            for (o_key, c_key, mult) in [
-                ("SUMMARY_O","SUMMARY_C", self.summary_weight),
-                ("DESC_O","DESC_C", self.desc_weight),
-            ]:
-                for s,e in spans_from_tags(o_key, c_key):
-                    s_abs, e_abs = asst_tok_start + s, asst_tok_start + e
-                    for t in range(s_abs, min(e_abs, len(weights))):
-                        weights[t] *= mult
-
-            # CONFIG last (strongest; may wrap CODE)
-            for s,e in spans_from_tags("CONFIG_O","CONFIG_C"):
-                s_abs, e_abs = asst_tok_start + s, asst_tok_start + e
-                for t in range(s_abs, min(e_abs, len(weights))):
-                    weights[t] *= self.config_weight
-
-            self.samples.append({
-                "input_ids": torch.tensor(ids, dtype=torch.long),
-                "labels": torch.tensor(labels, dtype=torch.long),
-                "weights": torch.tensor(weights, dtype=torch.float32),
-            })
-
-        if len(self.samples) > 0:
-            print(f"[OpalFinetuneDataset PATCHED] Built {len(self.samples)} samples; max_length={self.max_length}")
-            sample = self.samples[0]
-            nm = int((sample["labels"] != -100).sum().item())
-            print(f"   → Sample len={len(sample['input_ids'])}, learned tokens={nm}")
-
-    def __len__(self): return len(self.samples)
-
-    def __getitem__(self, idx): 
-        s = self.samples[idx]
-        return s["input_ids"], s["labels"], s["weights"]
+        return (
+            torch.tensor(ids, dtype=torch.long),
+            torch.tensor(labels, dtype=torch.long),
+            torch.tensor(weights, dtype=torch.float32),
+        )
