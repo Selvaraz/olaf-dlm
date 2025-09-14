@@ -182,7 +182,11 @@ def model_pretrain_test(start_fresh=False, opal_instance=None):
             start_fresh=start_fresh,
             eval_iter=eval_iter,
             eval_freq=eval_freq,
-            start_context="<USER> Show me the IP routing table configuration <ASSISTANT>",
+            start_context="""<QUESTION> Configure NAT overload for inside VLAN 2520 to internet via GigabitEthernet3/0/3.
+            Platform: iosxe </QUESTION>
+            <RESPONSE>
+            <SUMMARY>
+            """,
         )
         
         print(f"\n🎉 Fine-tuning completed successfully!")

@@ -85,43 +85,44 @@ _GPT_CONFIG_OPAL_45M = {
     "eos_id": 2,                   # End of sequence token (matches tokenizer training)
     "unk_id": 3                    # Unknown token
 }
-
-_GPT_CONFIG_OPAL_FINETUNE_45M = {
+GPT_CONFIG_OPAL_FINETUNE_45M = {
     "vocab_size": 12000,
-    "context_length": 512,       # ↑ for longer prompts
-    "emb_dim": 512,               # ↑ better token representations
-    "n_heads": 8,                 # scales well with emb_dim
-    "n_layers": 12,               # ↑ more reasoning depth
-    "drop_rate": 0.1,             # 🔧 Reduced from 0.2 - less aggressive dropout
-    "transformer_drop_rate": 0.15, # 🔧 Reduced from 0.2
-    "attention_drop_rate": 0.1,   # 🔧 Reduced from 0.15
+    "context_length": 512,
+    "emb_dim": 512,
+    "n_heads": 8,
+    "n_layers": 12,
+    # ↓ Slightly lighter regularization for SFT
+    "drop_rate": 0.05,               # was 0.1
+    "transformer_drop_rate": 0.10,   # was 0.15
+    "attention_drop_rate": 0.05,     # was 0.10
     "qkv_bias": True,
-    "num_epoch": 2,               # 🔧 ULTRA-CONSERVATIVE: Reduced from 3 to prevent forgetting
-    "learning_rate": 2e-5,        # 🔧 CRITICAL: Much lower to prevent catastrophic forgetting
-    "weight_decay": 0.005,        # 🔧 Reduced from 0.01 - minimal regularization
-    "warmup_steps": 100,          # 🔧 Adjusted for 2 epochs
-    "early_stopping_patience": 1, # 🔧 Very quick stopping if overfitting
+    "num_epoch": 2,                  # OK (use steps-based stopping if possible)
+    # ↓ LR & scheduling
+    "learning_rate": 5e-5,           # was 2e-5
+    "weight_decay": 0.005,
+    "warmup_steps": None,            # use ratio in trainer (see below)
+    "warmup_ratio": 0.04,            # 4% of total steps
+    "early_stopping_patience": 3,    # was 1
     "persistent_workers": False,
-    "gradient_accumulation_steps": 2, # 🔧 Larger accumulation for stability
+    "gradient_accumulation_steps": 4, # aim for effective batch 32–128
     "lr_scheduler": "cosine",
-    "max_grad_norm": 0.3,         # 🔧 Much stricter gradient clipping
-    "kv_heads" : 1,                # MQA
-    "use_rope": True,              # Rotary pos embeddings
-    "tie_embeddings": True,        # Tie input/output embeddings
-    # ✅ FIX: Add special token IDs to prevent CUDA index out of bounds (matches sptrainer.py)
-    "pad_id": 0,                   # Safe padding token
-    "bos_id": 1,                   # Beginning of sequence token (matches tokenizer training)
-    "eos_id": 2,                   # End of sequence token (matches tokenizer training)
-    "unk_id": 3,                    # Unknown token
-    "commands_weight": 3.0,       # Weight boost for command tokens in fine-tuning
+    "max_grad_norm": 1.0,            # was 0.3
+    "kv_heads": 1,
+    "use_rope": True,
+    "tie_embeddings": True,
+    "pad_id": 0, "bos_id": 1, "eos_id": 2, "unk_id": 3,
+    "commands_weight": 2.75,         # gentle bias to config/show blocks
+    "label_smoothing": 0.02,         # add this if your trainer supports it
 }
 
+# TRAINING RUNTIME (GPU)
 _TRAINING_CONFIG_GPU = {
     "device": get_device(),
-    "batch_size": 64,              # 🔧 Even smaller batches for ultra-conservative training
-    "num_workers": 2,             # 🔧 Reduced further for stability
-    "mixed_precision": True,     # 🔧 Disabled for fine-tuning stability
-    "gradient_accumulation_steps": 4  # 🔧 Matches model config for effective batch size 32
+    "batch_size": 12,                 # smaller micro-batch for stability
+    "num_workers": 2,
+    "mixed_precision": True,          # AMP is fine if stable; set False if you see NaNs
+    "gradient_accumulation_steps": 4, # effective batch ≈ 48
+    # If your trainer is steps-based, target 1–3k steps total for 10k samples, warmup 4%
 }
 
 # 🍎 MPS-specific ultra-conservative configuration for Apple Silicon
