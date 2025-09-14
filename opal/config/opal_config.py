@@ -98,7 +98,7 @@ GPT_CONFIG_OPAL_FINETUNE_45M = {
     "qkv_bias": True,
     "num_epoch": 2,                  # OK (use steps-based stopping if possible)
     # ↓ LR & scheduling
-    "learning_rate": 5e-5,           # was 2e-5
+    "learning_rate": 2e-6,           # was 2e-5
     "weight_decay": 0.005,
     "warmup_steps": None,            # use ratio in trainer (see below)
     "warmup_ratio": 0.04,            # 4% of total steps
@@ -106,7 +106,7 @@ GPT_CONFIG_OPAL_FINETUNE_45M = {
     "persistent_workers": False,
     "gradient_accumulation_steps": 4, # aim for effective batch 32–128
     "lr_scheduler": "cosine",
-    "max_grad_norm": 1.0,            # was 0.3
+    "max_grad_norm": 0.5,            # was 0.3
     "kv_heads": 1,
     "use_rope": True,
     "tie_embeddings": True,

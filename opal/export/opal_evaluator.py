@@ -20,14 +20,33 @@ def evaluate_pytorch(checkpoint_path, dataset_loader, device="cpu"):
 
     total_loss, total_tokens = 0, 0
     with torch.no_grad():
-        for batch in dataset_loader:
-            # Handle both 2-value and 3-value returns from dataset
-            if len(batch) == 3:
-                input_ids, targets, weights = batch
-            elif len(batch) == 2:
-                input_ids, targets = batch
+        for i, batch in enumerate(dataset_loader):
+            # Add debugging for first batch to understand format
+            if i == 0:
+                print(f"🔍 PYTORCH BATCH DEBUG: type={type(batch)}")
+                print(f"🔍 PYTORCH BATCH DEBUG: content_keys={list(batch.keys()) if isinstance(batch, dict) else 'not_dict'}")
+            
+            # Handle both dictionary and tuple batch formats
+            if isinstance(batch, dict):
+                # Handle dictionary format from some collate functions
+                input_ids = batch.get('input_ids')
+                if input_ids is None:
+                    input_ids = batch.get('inputs')
+                targets = batch.get('labels')
+                if targets is None:
+                    targets = batch.get('targets')
+                weights = batch.get('weights')
+                
+                if input_ids is None or targets is None:
+                    raise ValueError(f"Dictionary batch missing required keys. Available: {list(batch.keys())}")
             else:
-                raise ValueError(f"Unexpected batch format: expected 2 or 3 values, got {len(batch)}")
+                # Handle tuple/list format (original code)
+                if len(batch) == 3:
+                    input_ids, targets, weights = batch
+                elif len(batch) == 2:
+                    input_ids, targets = batch
+                else:
+                    raise ValueError(f"Unexpected batch format: expected 2 or 3 values, got {len(batch)}")
                 
             input_ids, targets = input_ids.to(device), targets.to(device)
             logits = model(input_ids)
@@ -53,14 +72,33 @@ def evaluate_onnx(onnx_path, dataset_loader, device=None):
     )
 
     total_loss, total_tokens = 0, 0
-    for batch in dataset_loader:
-        # Handle both 2-value and 3-value returns from dataset
-        if len(batch) == 3:
-            input_ids, targets, weights = batch
-        elif len(batch) == 2:
-            input_ids, targets = batch
+    for i, batch in enumerate(dataset_loader):
+        # Add debugging for first batch to understand format
+        if i == 0:
+            print(f"🔍 BATCH DEBUG: type={type(batch)}")
+            print(f"🔍 BATCH DEBUG: content_keys={list(batch.keys()) if isinstance(batch, dict) else 'not_dict'}")
+        
+        # Handle both dictionary and tuple batch formats
+        if isinstance(batch, dict):
+            # Handle dictionary format from some collate functions
+            input_ids = batch.get('input_ids')
+            if input_ids is None:
+                input_ids = batch.get('inputs')
+            targets = batch.get('labels')
+            if targets is None:
+                targets = batch.get('targets')
+            weights = batch.get('weights')
+            
+            if input_ids is None or targets is None:
+                raise ValueError(f"Dictionary batch missing required keys. Available: {list(batch.keys())}")
         else:
-            raise ValueError(f"Unexpected batch format: expected 2 or 3 values, got {len(batch)}")
+            # Handle tuple/list format (original code)
+            if len(batch) == 3:
+                input_ids, targets, weights = batch
+            elif len(batch) == 2:
+                input_ids, targets = batch
+            else:
+                raise ValueError(f"Unexpected batch format: expected 2 or 3 values, got {len(batch)}")
             
         input_ids_np = input_ids.numpy()
         logits = session.run(None, {"input_ids": input_ids_np})[0]
