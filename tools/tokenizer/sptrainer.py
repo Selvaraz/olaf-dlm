@@ -1,3 +1,12 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# train_sentencepiece_tokenizer.py
+# author: Selvaraj Mani
+# date: 09/15/2025
+# Purpose: Train a SentencePiece tokenizer for code tokenization.
+# Note: This script requires the `sentencepiece` library, which can be installed via pip:
+# ```pip install sentencepiece```
+
 import sentencepiece as spm
 import argparse
 import logging
@@ -5,11 +14,35 @@ from pathlib import Path
 import time
 from typing import Iterable, Iterator
 
+### Normalization rules to apply (For the Cisco Community Forums)
+# - Normalize whitespace: collapse multiple spaces/tabs/newlines into a single space.
+# - Keep **one** boundary marker: `<|doc|>` at the start of each thread.
+# - Use fenced blocks for structured text:
+#   - ```cisco for CLI/VSAs/config
+#   - ```log for time-stamped logs
+#   - ```output for tabular command output
+# - Replace volatiles/PII:
+#   - `<IP>`, `<MAC>`, `<TS>`, `<HEX>`, `<URL>`, `<EMAIL>`, `<USER>`, `<ORG>`
+# - Strip forum cruft: signatures, “Solved/Kudos” badges, page chrome, trackers.
+# - Flatten deep quoting if noisy (keep only minimal quoted lines that add technical value).
+# - Keep a lightweight header (Title/Topic/Date) as plain text—no custom XML tags.
+
+# This keeps your pretraining data consistent with the rest of the corpus (configs + logs + prose), and you can later convert a subset of threads into instruction-tuning samples without changing the raw data.
+
+
 try:
     from tqdm import tqdm  # type: ignore
 except Exception:  # pragma: no cover - graceful fallback if tqdm missing
     def tqdm(iterable=None, **kwargs):  # type: ignore
         return iterable if iterable is not None else []
+
+# Best practices of using the tokens in the pretrain corpus
+# 1. Use <|doc|> to delimit documents
+# 5. Use consistent casing and formatting for all tokens
+
+# The tokenizer will add the 
+# --bos_piece='<s>' --eos_piece='</s>', unk_piece='<unk>', pad_piece='<pad>'
+# All the router/switch/.. prompts will be replaced with device
 
 
 def train_tokenizer(
@@ -19,6 +52,32 @@ def train_tokenizer(
     model_type: str = "bpe",
     output_dir: Path = Path("."),
     show_progress: bool = True,
+    user_defined_symbols: Iterable[str] = (
+        "<|doc|>",
+        "```cisco-config",
+        "```cisco-exec",
+        "```log",
+        "```cisco-output",
+        "```cisco-syntax",
+        "```",
+        "```tcl",
+        "<|timestamp|>",
+        "<|question|>",
+        "<|end-question|>",
+        "<|answer|>",
+        "<|end-answer|>",
+        "<|ip|>",
+        "<|mac|>",
+        "<|hex|>",
+        "<|url|>",
+        "<|email|>",
+        "<|user|>",
+        "<|interface|>",
+        "<|vlan-id|>",
+        "<|ssid|>",
+        "<|ssid-name|>",
+    ),
+
     finetune_symbols = sorted([
         # --- Special Sequence Tokens ---
         # "<BOS>",  # Beginning of sequence
@@ -52,58 +111,6 @@ def train_tokenizer(
         "[", 
         "]", 
         ",",
-        
-        # --- Placeholder Tags (from your query) ---
-        "<INT>",
-        "<DATETIME>",
-        "<UUID>",
-        "<SEVERITY>",
-        "<RA>",
-        "<INSTANCE>",
-        "<PROCESS>",
-        "<FILEPATH>",
-        "<RESPONSE>",
-        "</RESPONSE>",
-        "<DOC>",
-        "</DOC>",
-        "<QUESTION>",
-        "</QUESTION>",
-        "<HEX>",
-        "<CODE>",
-        "</CODE>",
-        "<RECORD>",
-        "</RECORD>",
-        "<DIALOGUE>",
-        "<TOPIC>",
-        "</TOPIC>",
-        "</DIALOGUE>",
-        "<PATH>",
-        "<FLOAT>",
-        "<SUMMARY>",
-        "</SUMMARY>",
-        "<LOG>",
-        "</LOG>",
-        "<STR>",
-        "<SECTION>",
-        "</SECTION>",
-        "<DESCRIPTION>",
-        "</DESCRIPTION>",
-        "<MAC>",
-        "<SYNTAX>",
-        "</SYNTAX>",
-        "<USER>",
-        "<ASSISTANT>",
-        "<IP>",
-        "<AP>",
-        "<RFC>",
-        "</RFC>",
-        "<CONFIG>",
-        "</CONFIG>",
-        "<TITLE>",
-        "</TITLE>",
-        "<IFACE>",
-        "<INTERFACE>",
-        
         # --- Common network-related terms as atomic tokens ---
         "show", 
         "platform",

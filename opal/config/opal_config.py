@@ -61,7 +61,7 @@ def get_gpu_memory_allocated_size():
 
 _GPT_CONFIG_OPAL_45M = {
     "vocab_size": 12000,
-    "context_length": 512,       # ↑ for longer prompts
+    "context_length": 1024,       # ↑ for longer prompts
     "emb_dim": 512,               # ↑ better token representations
     "n_heads": 8,                 # scales well with emb_dim
     "n_layers": 12,               # ↑ more reasoning depth
@@ -74,7 +74,7 @@ _GPT_CONFIG_OPAL_45M = {
     "weight_decay": 0.1,
     "early_stopping_patience": 2,
     "persistent_workers": False,
-    "gradient_accumulation_steps": 1,  # ✅ Add explicitly
+    "gradient_accumulation_steps": 4,  # ✅ Add explicitly
     "max_grad_norm": 1.0,               # ✅ Add gradient clipping
     "kv_heads" : 1,                # MQA
     "use_rope": True,              # Rotary pos embeddings
@@ -85,9 +85,19 @@ _GPT_CONFIG_OPAL_45M = {
     "eos_id": 2,                   # End of sequence token (matches tokenizer training)
     "unk_id": 3                    # Unknown token
 }
+
+# TRAINING RUNTIME (GPU)
+_TRAINING_CONFIG_GPU = {
+    "device": get_device(),
+    "batch_size": 12,                 # smaller micro-batch for stability
+    "num_workers": 2,
+    "mixed_precision": True,          # AMP is fine if stable; set False if you see NaNs
+    # If your trainer is steps-based, target 1–3k steps total for 10k samples, warmup 4%
+}
+
 GPT_CONFIG_OPAL_FINETUNE_45M = {
     "vocab_size": 12000,
-    "context_length": 512,
+    "context_length": 1024,
     "emb_dim": 512,
     "n_heads": 8,
     "n_layers": 12,
@@ -115,15 +125,7 @@ GPT_CONFIG_OPAL_FINETUNE_45M = {
     "label_smoothing": 0.02,         # add this if your trainer supports it
 }
 
-# TRAINING RUNTIME (GPU)
-_TRAINING_CONFIG_GPU = {
-    "device": get_device(),
-    "batch_size": 12,                 # smaller micro-batch for stability
-    "num_workers": 2,
-    "mixed_precision": True,          # AMP is fine if stable; set False if you see NaNs
-    "gradient_accumulation_steps": 4, # effective batch ≈ 48
-    # If your trainer is steps-based, target 1–3k steps total for 10k samples, warmup 4%
-}
+
 
 # 🍎 MPS-specific ultra-conservative configuration for Apple Silicon
 _TRAINING_CONFIG_MPS = {
@@ -138,14 +140,116 @@ _TRAINING_CONFIG_MPS = {
     'use_gradient_checkpointing': True,  # Enable gradient checkpointing
 }
 
-OPAL_MODEL_CONFIG = GPT_CONFIG_OPAL_FINETUNE_45M
+# =====================================================
+# 🚀 3-PHASE TRAINING CONFIGURATION SYSTEM
+# =====================================================
 
-# Automatically select configuration based on device
-if torch.backends.mps.is_available():
-    TRAINING_CONFIG = _TRAINING_CONFIG_MPS
-    print("🍎 Using MPS-specific ultra-conservative configuration")
-else:
-    TRAINING_CONFIG = _TRAINING_CONFIG_GPU
+# Phase-specific model configurations
+_PHASE_CONFIGS = {
+    "pretraining": {
+        **_GPT_CONFIG_OPAL_45M,
+        "learning_rate": 3e-4,        # Higher LR for initial pretraining
+        "num_epoch": 2,               # 1-2 epochs sufficient for 5GB
+        "early_stopping_patience": 3,
+        "weight_decay": 0.1,
+        "gradient_accumulation_steps": 4,
+    },
+    
+    "domain_adaptation": {
+        **_GPT_CONFIG_OPAL_45M,
+        "learning_rate": 1e-4,        # Lower LR for domain adaptation
+        "num_epoch": 3,               # More focused training on domain data
+        "early_stopping_patience": 4,
+        "weight_decay": 0.05,         # Reduced weight decay
+        "gradient_accumulation_steps": 4,
+    },
+    
+    "fine_tuning": {
+        **GPT_CONFIG_OPAL_FINETUNE_45M,
+        "learning_rate": 5e-5,        # Increased from 2e-7 for better convergence
+        "num_epoch": 3,               # Sufficient for instruction following
+        "early_stopping_patience": 5,
+        "weight_decay": 0.01,         # Very low weight decay for fine-tuning
+        "gradient_accumulation_steps": 2,  # Smaller accumulation for stability
+    }
+}
+
+# Phase-specific training configurations
+_TRAINING_CONFIGS = {
+    "pretraining": {
+        **_TRAINING_CONFIG_GPU,
+        "batch_size": 16,             # Larger batches for pretraining efficiency
+        "mixed_precision": True,      # Enable for speed on large corpus
+        "num_workers": 2,
+    },
+    
+    "domain_adaptation": {
+        **_TRAINING_CONFIG_GPU,
+        "batch_size": 12,             # Moderate batch size
+        "mixed_precision": True,      # Keep enabled for efficiency
+        "num_workers": 2,
+    },
+    
+    "fine_tuning": {
+        **_TRAINING_CONFIG_GPU,
+        "batch_size": 8,              # Smaller batches for fine-tuning stability
+        "mixed_precision": False,     # Disabled for stability in fine-tuning
+        "num_workers": 0,             # No multiprocessing for fine-tuning
+    }
+}
+
+# Current training phase (default to pretraining)
+CURRENT_PHASE = "pretraining"
+
+def set_training_phase(phase: str):
+    """
+    Set the current training phase and update configurations accordingly.
+    
+    Args:
+        phase (str): One of ['pretraining', 'domain_adaptation', 'fine_tuning']
+    """
+    global OPAL_MODEL_CONFIG, TRAINING_CONFIG, CURRENT_PHASE
+    
+    valid_phases = ["pretraining", "domain_adaptation", "fine_tuning"]
+    if phase not in valid_phases:
+        raise ValueError(f"Invalid phase '{phase}'. Must be one of {valid_phases}")
+    
+    CURRENT_PHASE = phase
+    OPAL_MODEL_CONFIG = _PHASE_CONFIGS[phase].copy()
+    
+    # Apply device-specific adjustments
+    if torch.backends.mps.is_available():
+        TRAINING_CONFIG = {
+            **_TRAINING_CONFIG_MPS,
+            "batch_size": 2 if phase == "pretraining" else 1,  # Slightly larger for pretraining
+        }
+        print(f"🍎 Using MPS-specific configuration for {phase}")
+    else:
+        TRAINING_CONFIG = _TRAINING_CONFIGS[phase].copy()
+    
+    # Print configuration summary
+    phase_emoji = {"pretraining": "🚀", "domain_adaptation": "🎯", "fine_tuning": "🔧"}
+    print(f"\n{phase_emoji[phase]} ===== SWITCHED TO {phase.upper().replace('_', ' ')} PHASE =====")
+    print(f"📊 Model: {OPAL_MODEL_CONFIG['emb_dim']}D embedding, {OPAL_MODEL_CONFIG['n_layers']} layers")
+    print(f"📊 Learning rate: {OPAL_MODEL_CONFIG['learning_rate']:.2e}")
+    print(f"📊 Epochs: {OPAL_MODEL_CONFIG['num_epoch']}")
+    print(f"📊 Batch size: {TRAINING_CONFIG['batch_size']}")
+    print(f"📊 Gradient accumulation: {OPAL_MODEL_CONFIG['gradient_accumulation_steps']}")
+    print(f"📊 Mixed precision: {TRAINING_CONFIG['mixed_precision']}")
+    print(f"📊 Early stopping patience: {OPAL_MODEL_CONFIG['early_stopping_patience']}")
+    print(f"{phase_emoji[phase]} ================================================\n")
+
+def get_phase_description(phase: str) -> str:
+    """Get description of what each training phase accomplishes."""
+    descriptions = {
+        "pretraining": "General language understanding from mixed corpus (5GB: 2GB Cisco + 3GB FineWeb-EDU)",
+        "domain_adaptation": "Specialized Cisco domain knowledge from pure domain corpus (2GB Cisco docs)",
+        "fine_tuning": "Task-specific instruction following with curated dataset"
+    }
+    return descriptions.get(phase, "Unknown phase")
+
+# Initialize with pretraining configuration
+set_training_phase("pretraining")
 
 
 # _GPT_CONFIG_OPAL_FINETUNE_45M = {
