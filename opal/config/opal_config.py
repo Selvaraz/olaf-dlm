@@ -181,6 +181,7 @@ _TRAINING_CONFIGS = {
         "batch_size": 16,             # Larger batches for pretraining efficiency
         "mixed_precision": True,      # Enable for speed on large corpus
         "num_workers": 2,
+        "lora" : False
     },
     
     "domain_adaptation": {
@@ -188,6 +189,7 @@ _TRAINING_CONFIGS = {
         "batch_size": 12,             # Moderate batch size
         "mixed_precision": True,      # Keep enabled for efficiency
         "num_workers": 2,
+        "lora" : True
     },
     
     "fine_tuning": {
@@ -195,6 +197,7 @@ _TRAINING_CONFIGS = {
         "batch_size": 8,              # Smaller batches for fine-tuning stability
         "mixed_precision": False,     # Disabled for stability in fine-tuning
         "num_workers": 0,             # No multiprocessing for fine-tuning
+        "lora" : False
     }
 }
 
