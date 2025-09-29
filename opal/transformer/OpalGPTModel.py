@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from .OpalTransformer import OpalTransformerBlock
 from .OpalLayerNormalization import OpalLayerNormalization
+# LoRA Domain Adaptation: Import LoRA utilities for model injection
+from ..attention.lora_utils import LoRAConfig, inject_lora_into_model, freeze_base_model_weights
 
 class OpalGPT(nn.Module):
     def __init__(self, cfg):
@@ -46,12 +48,36 @@ class OpalGPT(nn.Module):
 
         self.cfg = cfg
 
+        # LoRA Domain Adaptation: Handle LoRA injection if enabled
+        self.lora_config = LoRAConfig.from_dict(cfg)  # LoRA Domain Adaptation: Extract LoRA config
+        self.lora_injected_modules = []  # LoRA Domain Adaptation: Track LoRA-injected modules
+        
+        if self.lora_config.use_lora:
+            print(f"🎯 LoRA Domain Adaptation: Injecting LoRA adapters into model...")
+            # LoRA Domain Adaptation: Inject LoRA adapters into attention layers
+            self, self.lora_injected_modules = inject_lora_into_model(
+                model=self,
+                lora_config=self.lora_config,
+                verbose=True
+            )
+            
+            # LoRA Domain Adaptation: Freeze base model weights, keep only LoRA trainable
+            frozen_params = freeze_base_model_weights(self, verbose=True)
+            print(f"🎯 LoRA Domain Adaptation: Frozen {frozen_params:,} base parameters")
+
         # ✅ CRITICAL DEBUG: Print actual model dimensions to detect vocab mismatches
         print(f"🔍 MODEL INITIALIZATION DEBUG:")
         print(f"   Config vocab_size: {cfg['vocab_size']}")
         print(f"   Token embedding vocab size: {self.token_embeddings.num_embeddings}")
         print(f"   Output head vocab size: {self.out_head.out_features}")
         print(f"   Embedding dim: {cfg['emb_dim']}")
+        
+        # LoRA Domain Adaptation: Print LoRA status
+        if self.lora_config.use_lora:
+            print(f"   LoRA enabled: rank={self.lora_config.rank}, alpha={self.lora_config.alpha}")
+            print(f"   LoRA modules: {len(self.lora_injected_modules)} injected")
+        else:
+            print(f"   LoRA disabled: using full model training")
         
         # Check for mismatches
         if self.token_embeddings.num_embeddings != cfg["vocab_size"]:
@@ -238,5 +264,39 @@ class OpalGPT(nn.Module):
             allocated = torch.mps.current_allocated_memory()
             return f"MPS Memory: {allocated / 1024**2:.1f} MB"
         return "MPS Memory: Stats unavailable"
+    
+    def is_lora_enabled(self) -> bool:
+        """LoRA Domain Adaptation: Check if LoRA is enabled for this model."""
+        return self.lora_config.use_lora and len(self.lora_injected_modules) > 0
+    
+    def get_lora_parameters(self):
+        """LoRA Domain Adaptation: Get all LoRA parameters for optimizer creation."""
+        from ..attention.lora_utils import get_lora_parameters
+        return get_lora_parameters(self)
+    
+    def merge_lora_weights(self, verbose: bool = True):
+        """LoRA Domain Adaptation: Merge LoRA adapter weights into base model."""
+        if not self.is_lora_enabled():
+            if verbose:
+                print("LoRA Domain Adaptation: No LoRA adapters to merge")
+            return self
+            
+        from ..attention.lora_utils import merge_lora_weights
+        return merge_lora_weights(self, verbose=verbose)
+    
+    def unload_lora_weights(self, verbose: bool = True):
+        """LoRA Domain Adaptation: Unload LoRA weights from base model."""
+        if not self.is_lora_enabled():
+            if verbose:
+                print("LoRA Domain Adaptation: No LoRA adapters to unload")
+            return self
+            
+        from ..attention.lora_utils import unload_lora_weights
+        return unload_lora_weights(self, verbose=verbose)
+    
+    def get_lora_info(self):
+        """LoRA Domain Adaptation: Get detailed information about LoRA adapters."""
+        from ..attention.lora_utils import get_model_lora_info
+        return get_model_lora_info(self)
 
 

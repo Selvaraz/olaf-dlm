@@ -1356,7 +1356,8 @@ class Opal:
                               timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")):
         """
         Saves a trained model checkpoint including model state, optimizer state,
-        epoch, training history, and config.
+        epoch, training history, and config. For LoRA models, saves both unified
+        and adapter-only checkpoints.
 
         Args:
             model (torch.nn.Module): The trained OpalGPT model instance.
@@ -1370,10 +1371,8 @@ class Opal:
         Returns:
             str: Path to the saved checkpoint file.
         """
-        #os.makedirs(OpalConstants.CHECKPOINT_DIR, exist_ok=True)
-
-        # checkpoint_path = os.path.join(OpalConstants.CHECKPOINT_DIR, 
-        #                             f"opal_gpt_checkpoint_{timestamp}.pt")
+        # LoRA Domain Adaptation: Check if model has LoRA adapters
+        has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
         
         checkpoint = {
             "model_state_dict": model.state_dict(),
@@ -1384,8 +1383,9 @@ class Opal:
             "val_losses": val_losses,
             "config": config,
             "tokenizer_model": tokenizer_model,
+            # LoRA Domain Adaptation: Add LoRA metadata
+            "has_lora": has_lora,
         }
-
 
         # Create a directory with current date and save the model inside the path
         date_dir = datetime.now().strftime("%Y%m%d")
@@ -1397,7 +1397,71 @@ class Opal:
         os.makedirs(checkpoint_dir, exist_ok=True)
         checkpoint_path = os.path.join(checkpoint_dir, f"opal_gpt_checkpoint_{timestamp}.pt")
         
-        torch.save(checkpoint, checkpoint_path)
+        # LoRA Domain Adaptation: Handle LoRA-specific checkpointing
+        if has_lora:
+            print("🎯 LoRA Domain Adaptation: Saving LoRA checkpoints...")
+            
+            # LoRA Domain Adaptation: Create subdirectories for different checkpoint types
+            base_dir = os.path.join(checkpoint_dir, "base")
+            lora_dir = os.path.join(checkpoint_dir, "lora") 
+            merged_dir = os.path.join(checkpoint_dir, "merged")
+            os.makedirs(base_dir, exist_ok=True)
+            os.makedirs(lora_dir, exist_ok=True)
+            os.makedirs(merged_dir, exist_ok=True)
+            
+            # LoRA Domain Adaptation: Save base model checkpoint (existing functionality)
+            base_checkpoint_path = os.path.join(base_dir, f"opal_gpt_base_{timestamp}.pt")
+            torch.save(checkpoint, base_checkpoint_path)
+            print(f"🎯 LoRA Domain Adaptation: Saved base checkpoint: {base_checkpoint_path}")
+            
+            # LoRA Domain Adaptation: Get LoRA configuration and base model info
+            lora_config = model.lora_config
+            base_model_info = {
+                "checkpoint_path": base_checkpoint_path,
+                "timestamp": timestamp,
+                "epoch": epoch,
+                "vocab_size": config.get("vocab_size", 12000),
+                "emb_dim": config.get("emb_dim", 512),
+                "n_layers": config.get("n_layers", 12),
+            }
+            
+            # LoRA Domain Adaptation: Save LoRA adapter weights
+            from ..attention.lora_utils import save_lora_adapters
+            adapter_path = os.path.join(lora_dir, f"lora_adapter_{timestamp}")
+            lora_manifest = save_lora_adapters(
+                model=model,
+                save_path=adapter_path,
+                lora_config=lora_config,
+                base_model_info=base_model_info,
+                format=lora_config.checkpoint_format
+            )
+            print(f"🎯 LoRA Domain Adaptation: Saved LoRA adapters: {adapter_path}")
+            
+            # LoRA Domain Adaptation: Create and save merged model if configured
+            if lora_config.merge_on_finalize:
+                print("🎯 LoRA Domain Adaptation: Creating merged model checkpoint...")
+                
+                # LoRA Domain Adaptation: Create a copy of the model for merging
+                import copy
+                merged_model = copy.deepcopy(model)
+                merged_model = merged_model.merge_lora_weights(verbose=True)
+                
+                # LoRA Domain Adaptation: Save merged checkpoint
+                merged_checkpoint = checkpoint.copy()
+                merged_checkpoint["model_state_dict"] = merged_model.state_dict()
+                merged_checkpoint["merged_from_lora"] = True
+                merged_checkpoint["lora_config"] = lora_config.to_dict()
+                
+                merged_checkpoint_path = os.path.join(merged_dir, f"opal_gpt_merged_{timestamp}.pt")
+                torch.save(merged_checkpoint, merged_checkpoint_path)
+                print(f"🎯 LoRA Domain Adaptation: Saved merged checkpoint: {merged_checkpoint_path}")
+            
+            # LoRA Domain Adaptation: Update main checkpoint path to point to base
+            checkpoint_path = base_checkpoint_path
+            
+        else:
+            # LoRA Domain Adaptation: Standard checkpointing for non-LoRA models
+            torch.save(checkpoint, checkpoint_path)
 
         # Copy the tokenizer model to the checkpoint directory (if available)
         if tokenizer_model and os.path.exists(tokenizer_model):
@@ -1410,7 +1474,6 @@ class Opal:
         else:
             print(f"⚠️ Warning: Tokenizer model path not provided or doesn't exist, skipping copy")
 
-        #print(f"Model checkpoint saved to {checkpoint_path}")
         # Create a symlink to the latest checkpoint
         if not self.is_finetune:
             symlink_path = os.path.join(OpalConstants.CHECKPOINT_DIR, "checkpoint-latest.pt")
@@ -1419,15 +1482,17 @@ class Opal:
 
         if os.path.exists(symlink_path):
             if os.path.islink(symlink_path) or os.path.isfile(symlink_path):
-                #print(f"Removing existing symlink or file at {symlink_path}")
                 os.remove(symlink_path)
             elif os.path.isdir(symlink_path):
-                #print(f"Removing existing directory at {symlink_path}")
                 shutil.rmtree(symlink_path)
         os.symlink(checkpoint_path, symlink_path)
-        #print(f"Latest checkpoint symlink created at {symlink_path}")
 
-        return checkpoint_path
+        # LoRA Domain Adaptation: Return checkpoint directory path for LoRA models
+        if has_lora:
+            print(f"🎯 LoRA Domain Adaptation: All checkpoints saved in: {checkpoint_dir}")
+            return checkpoint_dir  # LoRA Domain Adaptation: Return directory containing all checkpoint types
+        else:
+            return checkpoint_path  # LoRA Domain Adaptation: Return single file path for non-LoRA models
 
 
     def load_model_checkpoint(self, model_class, checkpoint_path, device="cpu", start_fresh=False, create_new=True):
@@ -1800,7 +1865,29 @@ class Opal:
         print(f"Creating adaptive optimizer with learning rate: {lr}, {self.config.get('learning_rate', 0)}")
         optimizer = None
 
-        if self.is_finetune:
+        # LoRA Domain Adaptation: Check if model has LoRA adapters
+        has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
+        if has_lora:
+            print("🎯 LoRA Domain Adaptation: Creating optimizer for LoRA parameters only")
+            
+            # LoRA Domain Adaptation: Get only LoRA parameters for training
+            lora_params = model.get_lora_parameters()
+            if not lora_params:
+                raise RuntimeError("LoRA Domain Adaptation: No LoRA parameters found for training")
+                
+            print(f"🎯 LoRA Domain Adaptation: Found {len(lora_params)} LoRA parameter groups")
+            total_lora_params = sum(p.numel() for p in lora_params)
+            print(f"🎯 LoRA Domain Adaptation: Total LoRA parameters: {total_lora_params:,}")
+            
+            # LoRA Domain Adaptation: Create optimizer with only LoRA parameters
+            adamw_kwargs = dict(betas=(0.9, 0.95), lr=lr, weight_decay=weight_decay, eps=1e-8)
+            try:
+                optimizer = torch.optim.AdamW(lora_params, fused=True, **adamw_kwargs)
+            except TypeError:
+                optimizer = torch.optim.AdamW(lora_params, **adamw_kwargs)
+                
+        elif self.is_finetune:
+            # LoRA Domain Adaptation: Standard fine-tuning optimizer (when LoRA is not used)
             decay, no_decay = set(), set()
             param_dict = {n: p for n, p in model.named_parameters()}
             for name, p in model.named_parameters():
@@ -1822,13 +1909,17 @@ class Opal:
                 optimizer = torch.optim.AdamW(optim_groups, **adamw_kwargs)
             print("✅ Fine-tuning optimizer with weight decay on applicable parameters")
         else:
+            # LoRA Domain Adaptation: Standard full-model training optimizer
             optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         
-        # 🔧 CRITICAL FIX: For fine-tuning, do NOT load optimizer state to ensure fresh learning rate
-        if optimizer_state_dict and not is_finetune:
+        # LoRA Domain Adaptation: Handle optimizer state loading (skip for LoRA training)
+        # 🔧 CRITICAL FIX: For fine-tuning or LoRA, do NOT load optimizer state to ensure fresh learning rate
+        if optimizer_state_dict and not self.is_finetune and not has_lora:
             print("✅ Loading optimizer state from checkpoint (pretraining mode)")
             optimizer.load_state_dict(optimizer_state_dict)
-        elif is_finetune:
+        elif has_lora:
+            print("🎯 LoRA Domain Adaptation: Starting with fresh optimizer state for LoRA training")
+        elif self.is_finetune:
             print("🔧 Fine-tuning mode: Starting with fresh optimizer state (preserving new learning rate)")
         else:
             print("✅ No optimizer state to load (training from scratch)")

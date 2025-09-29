@@ -153,6 +153,19 @@ _PHASE_CONFIGS = {
         "early_stopping_patience": 3,
         "weight_decay": 0.1,
         "gradient_accumulation_steps": 4,
+        # LoRA Domain Adaptation: Pretraining phase uses full model training (no LoRA)
+        "use_lora": False,            # LoRA Domain Adaptation: Disable LoRA for pretraining
+        "lora_rank": 16,              # LoRA Domain Adaptation: Default rank if enabled
+        "lora_alpha": 32,             # LoRA Domain Adaptation: Default alpha if enabled  
+        "lora_dropout": 0.1,          # LoRA Domain Adaptation: Default dropout if enabled
+        "target_modules": ["Wq", "Wk", "Wv", "out_proj"],  # LoRA Domain Adaptation: target modules
+        "lora_include_mlp": False,    # LoRA Domain Adaptation: MLP LoRA inclusion flag
+        # LoRA Domain Adaptation: Export and checkpointing configuration
+        "export": {
+            "merge_on_finalize": True,  # LoRA Domain Adaptation: Merge LoRA weights on training completion
+            "save_adapters": True,      # LoRA Domain Adaptation: Save separate adapter weights
+            "checkpoint_format": "safetensors",  # LoRA Domain Adaptation: Format for adapter checkpoints
+        },
     },
     
     "domain_adaptation": {
@@ -162,6 +175,13 @@ _PHASE_CONFIGS = {
         "early_stopping_patience": 4,
         "weight_decay": 0.05,         # Reduced weight decay
         "gradient_accumulation_steps": 4,
+        # LoRA Domain Adaptation: Core LoRA configuration for domain adaptation phase
+        "use_lora": True,             # LoRA Domain Adaptation: Enable LoRA for domain adaptation
+        "lora_rank": 16,              # LoRA Domain Adaptation: LoRA rank (r) - controls adapter capacity
+        "lora_alpha": 32,             # LoRA Domain Adaptation: LoRA scaling factor (alpha) - typically 2*rank
+        "lora_dropout": 0.1,          # LoRA Domain Adaptation: Dropout for LoRA layers
+        "target_modules": ["Wq", "Wk", "Wv", "out_proj"],  # LoRA Domain Adaptation: attention projections to inject LoRA
+        "lora_include_mlp": False,    # LoRA Domain Adaptation: Whether to include MLP layers in LoRA injection
     },
     
     "fine_tuning": {
@@ -171,6 +191,13 @@ _PHASE_CONFIGS = {
         "early_stopping_patience": 5,
         "weight_decay": 0.01,         # Very low weight decay for fine-tuning
         "gradient_accumulation_steps": 2,  # Smaller accumulation for stability
+        # LoRA Domain Adaptation: Fine-tuning typically doesn't use LoRA (direct fine-tuning)
+        "use_lora": False,            # LoRA Domain Adaptation: Disable LoRA for fine-tuning phase
+        "lora_rank": 8,               # LoRA Domain Adaptation: Smaller rank if LoRA is enabled
+        "lora_alpha": 16,             # LoRA Domain Adaptation: Corresponding alpha value
+        "lora_dropout": 0.05,         # LoRA Domain Adaptation: Lower dropout for fine-tuning
+        "target_modules": ["Wq", "Wk", "Wv", "out_proj"],  # LoRA Domain Adaptation: target modules
+        "lora_include_mlp": False,    # LoRA Domain Adaptation: MLP LoRA inclusion flag
     }
 }
 
@@ -218,6 +245,7 @@ def set_training_phase(phase: str):
         raise ValueError(f"Invalid phase '{phase}'. Must be one of {valid_phases}")
     
     CURRENT_PHASE = phase
+    # LoRA Domain Adaptation: Copy phase-specific configuration to global
     OPAL_MODEL_CONFIG = _PHASE_CONFIGS[phase].copy()
     
     # Apply device-specific adjustments
@@ -251,8 +279,14 @@ def get_phase_description(phase: str) -> str:
     }
     return descriptions.get(phase, "Unknown phase")
 
-# Initialize with pretraining configuration
-set_training_phase("pretraining")
+# Initialize with pretraining configuration as the default
+# LoRA Domain Adaptation: Removed automatic initialization to prevent config conflicts
+# set_training_phase("pretraining")  # LoRA Domain Adaptation: Users must explicitly set phase
+OPAL_MODEL_CONFIG = _PHASE_CONFIGS["pretraining"].copy()  # LoRA Domain Adaptation: Set default manually
+TRAINING_CONFIG = _TRAINING_CONFIGS["pretraining"].copy() if not torch.backends.mps.is_available() else {
+    **_TRAINING_CONFIG_MPS,
+    "batch_size": 2,  # Slightly larger for pretraining
+}  # LoRA Domain Adaptation: Set training config default
 
 
 # _GPT_CONFIG_OPAL_FINETUNE_45M = {
