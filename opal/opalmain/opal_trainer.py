@@ -567,17 +567,19 @@ class Opal:
         # LoRA Domain Adaptation: Proper gradient accumulation based on training phase
         has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
         
-        if self.is_finetune:
-            default_accumulation = 1  # Lower for fine-tuning stability
-        elif has_lora:
-            default_accumulation = 2  # Moderate for LoRA domain adaptation (smaller updates)
+        # Optional-LoRA-Finetune: Prioritize LoRA behavior when enabled (for both domain adaptation and LoRA fine-tuning)
+        if has_lora:
+            default_accumulation = 2  # Moderate for LoRA (smaller updates, works for both domain adaptation and fine-tuning)
+        elif self.is_finetune:
+            default_accumulation = 1  # Lower for traditional fine-tuning stability
         else:
             default_accumulation = 4  # Standard for pretraining
             
         gradient_accumulation_steps = self.config.get("gradient_accumulation_steps", default_accumulation)
         
         if has_lora:
-            print(f"🎯 LoRA Domain Adaptation: Using gradient accumulation steps: {gradient_accumulation_steps}")
+            phase_desc = "LoRA fine-tuning" if self.is_finetune else "LoRA domain adaptation"
+            print(f"🎯 {phase_desc}: Using gradient accumulation steps: {gradient_accumulation_steps}")
 
         # # 🚨 CRITICAL FIX: Force disable mixed precision for fine-tuning to prevent CUDA errors
         # if self.is_finetune:
@@ -732,7 +734,19 @@ class Opal:
                         print(f"\n🎯 === GENERATION SAMPLE AT STEP {global_step} ===")
                         
                         # LoRA Domain Adaptation: Phase-specific generation logic
-                        if self.is_finetune:
+                        # Optional-LoRA-Finetune: Prioritize LoRA behavior when enabled
+                        if has_lora and not self.is_finetune:
+                            print("🎯 LoRA Domain Adaptation: Generating sample...")
+                            self.generate_with_topk(
+                                model, tokenizer, device, start_context, top_k=40
+                            )
+                        elif has_lora and self.is_finetune:
+                            print("🎯 Optional-LoRA-Finetune: Generating sample...")
+                            self.generate_with_topk(
+                                model, tokenizer, device, start_context, top_k=35
+                            )
+                        elif self.is_finetune:
+                            # Traditional fine-tuning without LoRA
                             self.generate_for_finetune(
                                 model, tokenizer, device, start_context
                             )
@@ -741,11 +755,6 @@ class Opal:
                                 self.improve_generation_diversity(
                                     model, tokenizer, device, start_context
                                 )
-                        elif has_lora:
-                            print("🎯 LoRA Domain Adaptation: Generating sample...")
-                            self.generate_with_topk(
-                                model, tokenizer, device, start_context, top_k=40
-                            )
                         else:
                             self.generate_with_topk(
                                 model, tokenizer, device, start_context, top_k=50
