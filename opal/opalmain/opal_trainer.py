@@ -19,7 +19,7 @@ import math
 from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
-from typing import List
+from typing import List, Optional, Union
 from ..dataloader.OpalDataSet import OpalDataset
 from ..dataloader.OpalFineTuneDataSet import OpalFinetuneDataset
 from torch.utils.data import Dataset, DataLoader
@@ -381,13 +381,13 @@ class Opal:
     idx: torch.Tensor,                  # [B, T]
     max_new_tokens: int,
     context_size: int,                  # model’s max context length
-    top_k: int | None = None,
-    top_p: float | None = None,         # (0,1]
+    top_k: Optional[int] = None,
+    top_p: Optional[float] = None,         # (0,1]
     temperature: float = 1.0,           # 0 => greedy
-    eos_id: int | None = None,
+    eos_id: Optional[int] = None,
     repetition_penalty: float = 1.0,    # multiplicative (GPT-2 style)
     # 🔽 Anti-repetition knobs (new)
-    no_repeat_ngram_size: int | None = 3,     # e.g., 3 to block tri-gram repeats
+    no_repeat_ngram_size: Optional[int] = 3,     # e.g., 3 to block tri-gram repeats
     presence_penalty: float = 0.0,            # additive: -beta if token seen in window
     frequency_penalty: float = 0.0,           # additive: -alpha * count in window
     penalty_window: int = 64,                  # window for presence/frequency penalties
@@ -564,13 +564,20 @@ class Opal:
         use_mixed_precision = TRAINING_CONFIG.get("mixed_precision", False)
         max_grad_norm = self.config.get("max_grad_norm", 1.0)
         
-        # 🚨 CRITICAL FIX: Use LOWER gradient accumulation for fine-tuning to prevent CUDA errors
+        # LoRA Domain Adaptation: Proper gradient accumulation based on training phase
+        has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
+        
         if self.is_finetune:
-            default_accumulation = 1  # 🚨 REDUCED: Lower for fine-tuning stability
+            default_accumulation = 1  # Lower for fine-tuning stability
+        elif has_lora:
+            default_accumulation = 2  # Moderate for LoRA domain adaptation (smaller updates)
         else:
             default_accumulation = 4  # Standard for pretraining
             
         gradient_accumulation_steps = self.config.get("gradient_accumulation_steps", default_accumulation)
+        
+        if has_lora:
+            print(f"🎯 LoRA Domain Adaptation: Using gradient accumulation steps: {gradient_accumulation_steps}")
 
         # # 🚨 CRITICAL FIX: Force disable mixed precision for fine-tuning to prevent CUDA errors
         # if self.is_finetune:
@@ -723,6 +730,8 @@ class Opal:
                     # Generate sample every 2500 iterations to monitor quality (AFTER increment)
                     if global_step > 0 and global_step % 2500 == 0:
                         print(f"\n🎯 === GENERATION SAMPLE AT STEP {global_step} ===")
+                        
+                        # LoRA Domain Adaptation: Phase-specific generation logic
                         if self.is_finetune:
                             self.generate_for_finetune(
                                 model, tokenizer, device, start_context
@@ -732,6 +741,11 @@ class Opal:
                                 self.improve_generation_diversity(
                                     model, tokenizer, device, start_context
                                 )
+                        elif has_lora:
+                            print("🎯 LoRA Domain Adaptation: Generating sample...")
+                            self.generate_with_topk(
+                                model, tokenizer, device, start_context, top_k=40
+                            )
                         else:
                             self.generate_with_topk(
                                 model, tokenizer, device, start_context, top_k=50

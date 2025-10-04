@@ -160,12 +160,7 @@ _PHASE_CONFIGS = {
         "lora_dropout": 0.1,          # LoRA Domain Adaptation: Default dropout if enabled
         "target_modules": ["Wq", "Wk", "Wv", "out_proj"],  # LoRA Domain Adaptation: target modules
         "lora_include_mlp": False,    # LoRA Domain Adaptation: MLP LoRA inclusion flag
-        # LoRA Domain Adaptation: Export and checkpointing configuration
-        "export": {
-            "merge_on_finalize": True,  # LoRA Domain Adaptation: Merge LoRA weights on training completion
-            "save_adapters": True,      # LoRA Domain Adaptation: Save separate adapter weights
-            "checkpoint_format": "safetensors",  # LoRA Domain Adaptation: Format for adapter checkpoints
-        },
+        # LoRA Domain Adaptation: No export config needed for pretraining (no adapters to save)
     },
     
     "domain_adaptation": {
@@ -182,6 +177,12 @@ _PHASE_CONFIGS = {
         "lora_dropout": 0.1,          # LoRA Domain Adaptation: Dropout for LoRA layers
         "target_modules": ["Wq", "Wk", "Wv", "out_proj"],  # LoRA Domain Adaptation: attention projections to inject LoRA
         "lora_include_mlp": False,    # LoRA Domain Adaptation: Whether to include MLP layers in LoRA injection
+        # LoRA Domain Adaptation: Export and checkpointing configuration
+        "export": {
+            "merge_on_finalize": True,  # LoRA Domain Adaptation: Merge LoRA weights on training completion
+            "save_adapters": True,      # LoRA Domain Adaptation: Save separate adapter weights
+            "checkpoint_format": "safetensors",  # LoRA Domain Adaptation: Format for adapter checkpoints
+        },
     },
     
     "fine_tuning": {
