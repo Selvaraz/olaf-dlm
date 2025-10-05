@@ -250,23 +250,33 @@ def train_tokenizer(
                     yield line
 
     start_time = time.time()
-    # Use kwargs-based API so we can pass a sentence iterator to show progress.
-    # All parameters mirror the CLI flags used previously.
+    # Optimized settings for small language model with user-defined symbols
     spm.SentencePieceTrainer.train(
         sentence_iterator=_line_iterator(input_file, show_progress),
         model_prefix=full_model_prefix,
         vocab_size=vocab_size,
-        character_coverage=1.0,
+        character_coverage=0.9995,  # Slightly less than 1.0 for better efficiency
         model_type=model_type,
         unk_id=3,
         pad_id=0,
         bos_id=1,
         eos_id=2,
         byte_fallback=True,
-        hard_vocab_limit=False,
-        train_extremely_large_corpus=True,
+        hard_vocab_limit=True,  # Enforce strict vocab limit for small models
+        train_extremely_large_corpus=False,  # Better for smaller datasets/models
         user_defined_symbols=user_defined_symbols,
-        add_dummy_prefix=True,  # Always add dummy prefix for consistency
+        add_dummy_prefix=False,  # Keep disabled to prevent symbol splitting
+        treat_whitespace_as_suffix=False,  # Good for symbol preservation
+        allow_whitespace_only_pieces=True,  # Allow whitespace tokens
+        split_digits=False,  # Preserve numeric symbols like "802.1X"
+        normalization_rule_name="nfkc",  # Unicode normalization without case folding
+        remove_extra_whitespaces=True,  # Clean up training data
+        input_sentence_size=2000000,  # Limit for efficiency with small models
+        shuffle_input_sentence=True,  # Better training diversity
+        seed_sentencepiece_size=1000000,  # Reasonable seed size
+        shrinking_factor=0.75,  # Help with vocabulary pruning
+        num_threads=16,  # Utilize multiple cores
+        max_sentencepiece_length=20,  # Increased to accommodate longer user symbols
     )
     duration = time.time() - start_time
 
