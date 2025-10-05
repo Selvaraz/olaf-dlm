@@ -261,8 +261,8 @@ def train_tokenizer(
         pad_id=0,
         bos_id=1,
         eos_id=2,
-        byte_fallback=True,
-        hard_vocab_limit=True,  # Enforce strict vocab limit for small models
+        byte_fallback=False,
+        hard_vocab_limit=False,  # Enforce strict vocab limit for small models
         train_extremely_large_corpus=False,  # Better for smaller datasets/models
         user_defined_symbols=user_defined_symbols,
         add_dummy_prefix=False,  # Keep disabled to prevent symbol splitting
