@@ -271,7 +271,6 @@ def train_tokenizer(
         split_digits=False,  # Preserve numeric symbols like "802.1X"
         normalization_rule_name="nfkc",  # Unicode normalization without case folding
         remove_extra_whitespaces=True,  # Clean up training data
-        input_sentence_size=2000000,  # Limit for efficiency with small models
         shuffle_input_sentence=True,  # Better training diversity
         seed_sentencepiece_size=1000000,  # Reasonable seed size
         shrinking_factor=0.75,  # Help with vocabulary pruning
