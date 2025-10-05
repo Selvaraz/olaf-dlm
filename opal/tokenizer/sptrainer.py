@@ -101,6 +101,7 @@ user_defined_symbols = [
     "command",
     "configure",
     "cpu",
+    "crimson",
     "crypto",
     "cts",
     "database",
@@ -271,7 +272,7 @@ def train_tokenizer(
         split_digits=False,  # Preserve numeric symbols like "802.1X"
         normalization_rule_name="nfkc",  # Unicode normalization without case folding
         remove_extra_whitespaces=True,  # Clean up training data
-        shuffle_input_sentence=True,  # Better training diversity
+        shuffle_input_sentence=False,  # Better training diversity
         seed_sentencepiece_size=1000000,  # Reasonable seed size
         shrinking_factor=0.75,  # Help with vocabulary pruning
         num_threads=16,  # Utilize multiple cores
