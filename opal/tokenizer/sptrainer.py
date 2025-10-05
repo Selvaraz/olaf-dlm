@@ -264,7 +264,7 @@ def train_tokenizer(
         eos_id=2,
         byte_fallback=False,
         hard_vocab_limit=False,  # Enforce strict vocab limit for small models
-        train_extremely_large_corpus=False,  # Better for smaller datasets/models
+        train_extremely_large_corpus=True,  # Better for smaller datasets/models
         user_defined_symbols=user_defined_symbols,
         add_dummy_prefix=False,  # Keep disabled to prevent symbol splitting
         treat_whitespace_as_suffix=False,  # Good for symbol preservation
