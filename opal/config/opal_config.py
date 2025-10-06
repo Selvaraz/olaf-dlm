@@ -179,8 +179,8 @@ _PHASE_CONFIGS = {
         "gradient_accumulation_steps": 4,
         # LoRA Domain Adaptation: Core LoRA configuration for domain adaptation phase
         "use_lora": True,             # LoRA Domain Adaptation: Enable LoRA for domain adaptation
-        "lora_rank": 16,              # LoRA Domain Adaptation: LoRA rank (r) - controls adapter capacity
-        "lora_alpha": 32,             # LoRA Domain Adaptation: LoRA scaling factor (alpha) - typically 2*rank
+        "lora_rank": 32,              # LoRA Domain Adaptation: LoRA rank (r) - controls adapter capacity
+        "lora_alpha": 64,             # LoRA Domain Adaptation: LoRA scaling factor (alpha) - typically 2*rank
         "lora_dropout": 0.1,          # LoRA Domain Adaptation: Dropout for LoRA layers
         "target_modules": ["Wq", "Wk", "Wv", "out_proj"],  # LoRA Domain Adaptation: attention projections to inject LoRA
         "lora_include_mlp": False,    # LoRA Domain Adaptation: Whether to include MLP layers in LoRA injection

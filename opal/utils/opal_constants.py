@@ -10,9 +10,11 @@ class OpalConstants:
     #SYSTEM_ROOT_PATH = "/Users/selvmani/Runs"
     SYSTEM_ROOT_PATH= "/home/selvaraj"
     RUNTIME_ROOT_PATH = f"{SYSTEM_ROOT_PATH}/workspace"
-    CHECKPOINT_DIR = f"{RUNTIME_ROOT_PATH}/checkpoints"
+    CHECKPOINT_DIR = f"{RUNTIME_ROOT_PATH}/pretrain_checkpoints"
+    CHECKPOINT_NAME = "checkpoint-latest-pretrain.pt"
     TENSORBOARD_RUN_DIR = f"{CHECKPOINT_DIR}/runs"
-    CHECKPOINT_PATH = f"{CHECKPOINT_DIR}/checkpoint-latest.pt"
+    CHECKPOINT_PATH = f"{CHECKPOINT_DIR}/{CHECKPOINT_NAME}"
+    CHECKPOINT_NAME 
     
 
     ## INPUTS

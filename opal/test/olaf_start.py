@@ -15,7 +15,7 @@ import shutil
 sp = spm.SentencePieceProcessor()
 sp.load(OpalConstants.TOKENIZER_MODEL_PATH)
 # Create Opal instance with tokenizer
-opalInstance = Opal(config=OPAL_MODEL_CONFIG, tokenizer=sp)
+opalInstance = Opal(config=OPAL_MODEL_CONFIG, tokenizer=sp, is_dapt=False)
 torch.manual_seed(123)
 
 device = TRAINING_CONFIG["device"]

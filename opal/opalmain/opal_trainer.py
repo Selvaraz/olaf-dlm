@@ -40,12 +40,14 @@ import wandb
 class Opal:
     def __init__(self, config, tokenizer=None, 
                 start_fresh=False, is_finetune=False,
-                finetune_data_path=None):
+                finetune_data_path=None,
+                is_dapt=False):
         self.config = config
         self.tokenizer = tokenizer
         self.start_fresh = start_fresh
         self.is_finetune = is_finetune
         self.finetune_data_path = finetune_data_path
+        self.is_dapt = is_dapt
     
     def collate_finetune(self, batch):
         from torch.nn.utils.rnn import pad_sequence
@@ -736,12 +738,12 @@ class Opal:
                         # LoRA Domain Adaptation: Phase-specific generation logic
                         # Optional-LoRA-Finetune: Prioritize LoRA behavior when enabled
                         if has_lora and not self.is_finetune:
-                            print("🎯 LoRA Domain Adaptation: Generating sample...")
+                            print("\n🎯 LoRA Domain Adaptation: Generating sample...")
                             self.generate_with_topk(
                                 model, tokenizer, device, start_context, top_k=40
                             )
                         elif has_lora and self.is_finetune:
-                            print("🎯 Optional-LoRA-Finetune: Generating sample...")
+                            print("\n🎯 Optional-LoRA-Finetune: Generating sample...")
                             self.generate_with_topk(
                                 model, tokenizer, device, start_context, top_k=35
                             )
@@ -759,7 +761,7 @@ class Opal:
                             self.generate_with_topk(
                                 model, tokenizer, device, start_context, top_k=50
                             )
-                        print(f"🎯 ============================================\n")
+                        print(f"\n🎯 ============================================\n")
                     
                     # Update progress bar with accumulated loss
                     if hasattr(loss, 'item'):
@@ -788,10 +790,10 @@ class Opal:
                     
                     # 🔧 DEBUG: Log evaluation frequency once
                     if global_step == 1:
-                        print(f"📊 Evaluation frequency set to: {eval_frequency} steps")
+                        print(f"\n📊 Evaluation frequency set to: {eval_frequency} steps")
                     
                     if global_step % eval_frequency == 0 and global_step > 0:
-                        print(f"📊 === STEP-BASED EVALUATION AT STEP {global_step} ===")
+                        print(f"\n📊 === STEP-BASED EVALUATION AT STEP {global_step} ===")
                         train_loss, val_loss = self.evaluate_model(
                             model, train_loader, val_loader, device, eval_iter)
                         train_losses.append(train_loss)
@@ -809,7 +811,7 @@ class Opal:
                         # Early Stopping Logic (best val loss updated here)
                         if val_loss < best_val_loss:
                             best_val_loss = val_loss
-                            print(f"🔥 New best val_loss {val_loss:.6f}! Saving checkpoint...")
+                            print(f"\n🔥 New best val_loss {val_loss:.6f}! Saving checkpoint...")
                             # Try to get tokenizer model path
                             tokenizer_model_path = None
                             if hasattr(tokenizer, 'model_file') and tokenizer.model_file:
@@ -825,7 +827,7 @@ class Opal:
                                 tokenizer_model_path
                             )
                         else:
-                            print(f"⚠️ No improvement (current: {val_loss:.6f}, best: {best_val_loss:.6f})")
+                            print(f"\n⚠️ No improvement (current: {val_loss:.6f}, best: {best_val_loss:.6f})")
 
                         # Calculate tokens/sec
                         elapsed = time.time() - start_time
@@ -887,7 +889,7 @@ class Opal:
             # Update best validation loss if improved
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                print(f"🎉 NEW BEST VALIDATION LOSS: {best_val_loss:.6f}")
+                print(f"\n🎉 NEW BEST VALIDATION LOSS: {best_val_loss:.6f}")
                 
                 # Save checkpoint when validation improves
                 # Try to get tokenizer model path from various sources
@@ -902,7 +904,7 @@ class Opal:
                 checkpoint_path = self.save_model_checkpoint(
                     self.config, model, optimizer, scheduler, epoch, 
                     train_losses, val_losses, tokenizer_model_path)
-                print(f"💾 Checkpoint saved: {checkpoint_path}")
+                print(f"\n💾 Checkpoint saved: {checkpoint_path}")
 
             # ✅ After each epoch, check if val_loss improved in this epoch
             epoch_duration = time.time() - epoch_start_time
@@ -915,9 +917,9 @@ class Opal:
                 improvement_msg = f"⚠️ No improvement for {epochs_no_improve} epochs"
             
             print(f"\n🏁 === EPOCH {epoch+1}/{num_epochs} COMPLETED ===")
-            print(f"⏱️ Epoch duration: {epoch_duration:.2f} seconds")
-            print(f"📊 {improvement_msg}")
-            print(f"📊 Current best validation loss: {best_val_loss:.6f}")
+            print(f"\n⏱️ Epoch duration: {epoch_duration:.2f} seconds")
+            print(f"\n📊 {improvement_msg}")
+            print(f"\n📊 Current best validation loss: {best_val_loss:.6f}")
 
             if epochs_no_improve >= early_stopping_patience:
                 print(f"\n⛔ === EARLY STOPPING TRIGGERED ===")
@@ -950,11 +952,11 @@ class Opal:
                 )
 
         print(f"\n🎉 === TRAINING COMPLETED SUCCESSFULLY ===")
-        print(f"🎉 All {num_epochs} epochs completed!")
-        print(f"🎉 Final best validation loss: {best_val_loss:.6f}")
-        print(f"🎉 Total training steps: {global_step+1:,}")
-        print(f"🎉 Total tokens processed: {tokens_seen:,}")
-        print(f"🎉 ========================================")
+        print(f"\n🎉 All {num_epochs} epochs completed!")
+        print(f"\n🎉 Final best validation loss: {best_val_loss:.6f}")
+        print(f"\n🎉 Total training steps: {global_step+1:,}")
+        print(f"\n🎉 Total tokens processed: {tokens_seen:,}")
+        print(f"\n🎉 ========================================")
 
         # Export to ONNX and quantized ONNX after training completion
         self._export_to_onnx(device, val_loader, writer, log_to_wandb)
@@ -1866,9 +1868,9 @@ class Opal:
         # ----------------------------------------
         # Load Checkpoint if available
         # ----------------------------------------
-        # During fine tune we must need the previous checkpoint
-        if self.is_finetune and not os.path.exists(checkpoint_path):
-            print(f"❌ Fine-tuning requires a checkpoint, but {checkpoint_path} not found!")
+        # During fine tune and domain adpatation we must need the previous checkpoint
+        if (self.is_finetune or self.is_dapt) and not os.path.exists(checkpoint_path):
+            print(f"❌ Fine-tuning/DAPT requires a checkpoint, but {checkpoint_path} not found!")
             return None
 
         try:
@@ -2077,12 +2079,14 @@ class Opal:
 
         print("✅ Created learning rate scheduler")
         
-        # 🔧 CRITICAL FIX: For fine-tuning, do NOT load scheduler state to ensure fresh learning schedule
-        if scheduler_state_dict and not is_finetune:
+        # 🔧 CRITICAL FIX: For fine-tuning and DAPT, do NOT load scheduler state to ensure fresh learning schedule
+        if scheduler_state_dict and not is_finetune and not self.is_dapt:
             print("✅ Loading scheduler state from checkpoint (pretraining mode)")
             cosine_scheduler.load_state_dict(scheduler_state_dict)
         elif is_finetune:
             print("🔧 Fine-tuning mode: Starting with fresh scheduler state (preserving new learning schedule)")
+        elif self.is_dapt:
+            print("🎯 DAPT mode: Starting with fresh scheduler state for optimal domain adaptation")
         else:
             print("✅ No scheduler state to load (training from scratch)")
 
