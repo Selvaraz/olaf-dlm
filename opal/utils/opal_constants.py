@@ -8,7 +8,7 @@ class OpalConstants:
     
     # RUNTIME PATHS
     #SYSTEM_ROOT_PATH = "/Users/selvmani/Runs"
-    SYSTEM_ROOT_PATH= "/home/selvaraj"
+    SYSTEM_ROOT_PATH= ""
     RUNTIME_ROOT_PATH = f"{SYSTEM_ROOT_PATH}/workspace"
     CHECKPOINT_DIR = f"{RUNTIME_ROOT_PATH}/pretrain_checkpoints"
     CHECKPOINT_NAME = "checkpoint-latest-pretrain.pt"
