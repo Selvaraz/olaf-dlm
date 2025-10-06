@@ -209,7 +209,7 @@ _TRAINING_CONFIGS = {
     "pretraining": {
         **_TRAINING_CONFIG_GPU,
         "batch_size": 16,             # Larger batches for pretraining efficiency
-        "mixed_precision": True,      # Enable for speed on large corpus
+        "mixed_precision": get_scaler() is not None,      # Enable for speed on large corpus
         "num_workers": 2,
         "lora" : False
     },
