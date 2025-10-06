@@ -231,97 +231,116 @@ _TRAINING_CONFIGS = {
     }
 }
 
-# Current training phase (default to pretraining)
 CURRENT_PHASE = "pretraining"
+OPAL_MODEL_CONFIG = _PHASE_CONFIGS[CURRENT_PHASE].copy()
+TRAINING_CONFIG = _TRAINING_CONFIGS[CURRENT_PHASE].copy()
 
-def set_training_phase(phase: str):
-    """
-    Set the current training phase and update configurations accordingly.
-    
-    Args:
-        phase (str): One of ['pretraining', 'domain_adaptation', 'fine_tuning']
-    """
-    global OPAL_MODEL_CONFIG, TRAINING_CONFIG, CURRENT_PHASE
-    
-    valid_phases = ["pretraining", "domain_adaptation", "fine_tuning"]
-    if phase not in valid_phases:
-        raise ValueError(f"Invalid phase '{phase}'. Must be one of {valid_phases}")
-    
-    CURRENT_PHASE = phase
-    # LoRA Domain Adaptation: Copy phase-specific configuration to global
-    OPAL_MODEL_CONFIG = _PHASE_CONFIGS[phase].copy()
-    
-    # Apply device-specific adjustments
-    if torch.backends.mps.is_available():
-        TRAINING_CONFIG = {
-            **_TRAINING_CONFIG_MPS,
-            "batch_size": 2 if phase == "pretraining" else 1,  # Slightly larger for pretraining
-            "lora": _TRAINING_CONFIGS[phase].get("lora", False),  # Optional-LoRA-Finetune: Preserve LoRA flag for MPS
-        }
-        print(f"🍎 Using MPS-specific configuration for {phase}")
-    else:
-        TRAINING_CONFIG = _TRAINING_CONFIGS[phase].copy()
-    
-    # Optional-LoRA-Finetune: Synchronize LoRA flag between model and training configs
-    if phase == "fine_tuning":
-        TRAINING_CONFIG["lora"] = OPAL_MODEL_CONFIG.get("use_lora", False)
-    
-    # Print configuration summary
-    phase_emoji = {"pretraining": "🚀", "domain_adaptation": "🎯", "fine_tuning": "🔧"}
-    print(f"\n{phase_emoji[phase]} ===== SWITCHED TO {phase.upper().replace('_', ' ')} PHASE =====")
-    print(f"📊 Model: {OPAL_MODEL_CONFIG['emb_dim']}D embedding, {OPAL_MODEL_CONFIG['n_layers']} layers")
-    print(f"📊 Learning rate: {OPAL_MODEL_CONFIG['learning_rate']:.2e}")
-    print(f"📊 Epochs: {OPAL_MODEL_CONFIG['num_epoch']}")
-    print(f"📊 Batch size: {TRAINING_CONFIG['batch_size']}")
-    print(f"📊 Gradient accumulation: {OPAL_MODEL_CONFIG['gradient_accumulation_steps']}")
-    print(f"📊 Mixed precision: {TRAINING_CONFIG['mixed_precision']}")
-    print(f"📊 Early stopping patience: {OPAL_MODEL_CONFIG['early_stopping_patience']}")
-    # Optional-LoRA-Finetune: Show LoRA status for fine-tuning phase
-    if phase == "fine_tuning":
-        lora_status = "ENABLED" if OPAL_MODEL_CONFIG.get("use_lora", False) else "DISABLED"
-        print(f"📊 Optional-LoRA-Finetune: {lora_status}")
-    print(f"{phase_emoji[phase]} ================================================\n")
+phase_emoji = {"pretraining": "🚀", "domain_adaptation": "🎯", "fine_tuning": "🔧"}
+print(f"\n{phase_emoji[CURRENT_PHASE]} ===== SWITCHED TO {CURRENT_PHASE.upper().replace('_', ' ')} PHASE =====")
+print(f"📊 Model: {OPAL_MODEL_CONFIG['emb_dim']}D embedding, {OPAL_MODEL_CONFIG['n_layers']} layers")
+print(f"📊 Learning rate: {OPAL_MODEL_CONFIG['learning_rate']:.2e}")
+print(f"📊 Epochs: {OPAL_MODEL_CONFIG['num_epoch']}")
+print(f"📊 Batch size: {TRAINING_CONFIG['batch_size']}")
+print(f"📊 Gradient accumulation: {OPAL_MODEL_CONFIG['gradient_accumulation_steps']}")
+print(f"📊 Mixed precision: {TRAINING_CONFIG['mixed_precision']}")
+print(f"📊 Early stopping patience: {OPAL_MODEL_CONFIG['early_stopping_patience']}")
+# Optional-LoRA-Finetune: Show LoRA status for fine-tuning phase
+if CURRENT_PHASE == "fine_tuning":
+    lora_status = "ENABLED" if OPAL_MODEL_CONFIG.get("use_lora", False) else "DISABLED"
+    print(f"📊 Optional-LoRA-Finetune: {lora_status}")
+print(f"{phase_emoji[CURRENT_PHASE]} ================================================\n")
 
-def get_phase_description(phase: str) -> str:
-    """Get description of what each training phase accomplishes."""
-    descriptions = {
-        "pretraining": "General language understanding from mixed corpus (5GB: 2GB Cisco + 3GB FineWeb-EDU)",
-        "domain_adaptation": "Specialized Cisco domain knowledge from pure domain corpus (2GB Cisco docs)",
-        "fine_tuning": "Task-specific instruction following with curated dataset"
-    }
-    return descriptions.get(phase, "Unknown phase")
+# # Current training phase (default to pretraining)
+# CURRENT_PHASE = "pretraining"
 
-# Optional-LoRA-Finetune: Helper functions for fine-tuning LoRA configuration
-def enable_finetune_lora():
-    """Enable LoRA for fine-tuning phase."""
-    global OPAL_MODEL_CONFIG, TRAINING_CONFIG
-    if CURRENT_PHASE == "fine_tuning":
-        OPAL_MODEL_CONFIG["use_lora"] = True
-        TRAINING_CONFIG["lora"] = True
-        print("🔧 Optional-LoRA-Finetune: LoRA ENABLED for fine-tuning phase")
-        print(f"   → LoRA rank: {OPAL_MODEL_CONFIG['lora_rank']}, alpha: {OPAL_MODEL_CONFIG['lora_alpha']}")
-    else:
-        print(f"⚠️  Optional-LoRA-Finetune: Can only enable LoRA in fine_tuning phase (current: {CURRENT_PHASE})")
+# def set_training_phase(phase: str):
+#     """
+#     Set the current training phase and update configurations accordingly.
+    
+#     Args:
+#         phase (str): One of ['pretraining', 'domain_adaptation', 'fine_tuning']
+#     """
+#     global OPAL_MODEL_CONFIG, TRAINING_CONFIG, CURRENT_PHASE
+    
+#     valid_phases = ["pretraining", "domain_adaptation", "fine_tuning"]
+#     if phase not in valid_phases:
+#         raise ValueError(f"Invalid phase '{phase}'. Must be one of {valid_phases}")
+    
+#     CURRENT_PHASE = phase
+#     # LoRA Domain Adaptation: Copy phase-specific configuration to global
+#     OPAL_MODEL_CONFIG = _PHASE_CONFIGS[phase].copy()
+    
+#     # Apply device-specific adjustments
+#     if torch.backends.mps.is_available():
+#         TRAINING_CONFIG = {
+#             **_TRAINING_CONFIG_MPS,
+#             "batch_size": 2 if phase == "pretraining" else 1,  # Slightly larger for pretraining
+#             "lora": _TRAINING_CONFIGS[phase].get("lora", False),  # Optional-LoRA-Finetune: Preserve LoRA flag for MPS
+#         }
+#         print(f"🍎 Using MPS-specific configuration for {phase}")
+#     else:
+#         TRAINING_CONFIG = _TRAINING_CONFIGS[phase].copy()
+    
+#     # Optional-LoRA-Finetune: Synchronize LoRA flag between model and training configs
+#     if phase == "fine_tuning":
+#         TRAINING_CONFIG["lora"] = OPAL_MODEL_CONFIG.get("use_lora", False)
+    
+#     # Print configuration summary
+#     phase_emoji = {"pretraining": "🚀", "domain_adaptation": "🎯", "fine_tuning": "🔧"}
+#     print(f"\n{phase_emoji[phase]} ===== SWITCHED TO {phase.upper().replace('_', ' ')} PHASE =====")
+#     print(f"📊 Model: {OPAL_MODEL_CONFIG['emb_dim']}D embedding, {OPAL_MODEL_CONFIG['n_layers']} layers")
+#     print(f"📊 Learning rate: {OPAL_MODEL_CONFIG['learning_rate']:.2e}")
+#     print(f"📊 Epochs: {OPAL_MODEL_CONFIG['num_epoch']}")
+#     print(f"📊 Batch size: {TRAINING_CONFIG['batch_size']}")
+#     print(f"📊 Gradient accumulation: {OPAL_MODEL_CONFIG['gradient_accumulation_steps']}")
+#     print(f"📊 Mixed precision: {TRAINING_CONFIG['mixed_precision']}")
+#     print(f"📊 Early stopping patience: {OPAL_MODEL_CONFIG['early_stopping_patience']}")
+#     # Optional-LoRA-Finetune: Show LoRA status for fine-tuning phase
+#     if phase == "fine_tuning":
+#         lora_status = "ENABLED" if OPAL_MODEL_CONFIG.get("use_lora", False) else "DISABLED"
+#         print(f"📊 Optional-LoRA-Finetune: {lora_status}")
+#     print(f"{phase_emoji[phase]} ================================================\n")
 
-def disable_finetune_lora():
-    """Disable LoRA for fine-tuning phase (traditional fine-tuning)."""
-    global OPAL_MODEL_CONFIG, TRAINING_CONFIG
-    if CURRENT_PHASE == "fine_tuning":
-        OPAL_MODEL_CONFIG["use_lora"] = False
-        TRAINING_CONFIG["lora"] = False
-        print("🔧 Optional-LoRA-Finetune: LoRA DISABLED for fine-tuning phase (traditional fine-tuning)")
-    else:
-        print(f"⚠️  Optional-LoRA-Finetune: Can only disable LoRA in fine_tuning phase (current: {CURRENT_PHASE})")
+# def get_phase_description(phase: str) -> str:
+#     """Get description of what each training phase accomplishes."""
+#     descriptions = {
+#         "pretraining": "General language understanding from mixed corpus (5GB: 2GB Cisco + 3GB FineWeb-EDU)",
+#         "domain_adaptation": "Specialized Cisco domain knowledge from pure domain corpus (2GB Cisco docs)",
+#         "fine_tuning": "Task-specific instruction following with curated dataset"
+#     }
+#     return descriptions.get(phase, "Unknown phase")
 
-def is_finetune_lora_enabled() -> bool:
-    """Check if LoRA is enabled for fine-tuning."""
-    return CURRENT_PHASE == "fine_tuning" and OPAL_MODEL_CONFIG.get("use_lora", False)
+# # Optional-LoRA-Finetune: Helper functions for fine-tuning LoRA configuration
+# def enable_finetune_lora():
+#     """Enable LoRA for fine-tuning phase."""
+#     global OPAL_MODEL_CONFIG, TRAINING_CONFIG
+#     if CURRENT_PHASE == "fine_tuning":
+#         OPAL_MODEL_CONFIG["use_lora"] = True
+#         TRAINING_CONFIG["lora"] = True
+#         print("🔧 Optional-LoRA-Finetune: LoRA ENABLED for fine-tuning phase")
+#         print(f"   → LoRA rank: {OPAL_MODEL_CONFIG['lora_rank']}, alpha: {OPAL_MODEL_CONFIG['lora_alpha']}")
+#     else:
+#         print(f"⚠️  Optional-LoRA-Finetune: Can only enable LoRA in fine_tuning phase (current: {CURRENT_PHASE})")
 
-# Initialize with pretraining configuration as the default
-# LoRA Domain Adaptation: Removed automatic initialization to prevent config conflicts
-# set_training_phase("pretraining")  # LoRA Domain Adaptation: Users must explicitly set phase
-OPAL_MODEL_CONFIG = _PHASE_CONFIGS["pretraining"].copy()  # LoRA Domain Adaptation: Set default manually
-TRAINING_CONFIG = _TRAINING_CONFIGS["pretraining"].copy() if not torch.backends.mps.is_available() else {
-    **_TRAINING_CONFIG_MPS,
-    "batch_size": 2,  # Slightly larger for pretraining
-}  # LoRA Domain Adaptation: Set training config default
+# def disable_finetune_lora():
+#     """Disable LoRA for fine-tuning phase (traditional fine-tuning)."""
+#     global OPAL_MODEL_CONFIG, TRAINING_CONFIG
+#     if CURRENT_PHASE == "fine_tuning":
+#         OPAL_MODEL_CONFIG["use_lora"] = False
+#         TRAINING_CONFIG["lora"] = False
+#         print("🔧 Optional-LoRA-Finetune: LoRA DISABLED for fine-tuning phase (traditional fine-tuning)")
+#     else:
+#         print(f"⚠️  Optional-LoRA-Finetune: Can only disable LoRA in fine_tuning phase (current: {CURRENT_PHASE})")
+
+# def is_finetune_lora_enabled() -> bool:
+#     """Check if LoRA is enabled for fine-tuning."""
+#     return CURRENT_PHASE == "fine_tuning" and OPAL_MODEL_CONFIG.get("use_lora", False)
+
+# # Initialize with pretraining configuration as the default
+# # LoRA Domain Adaptation: Removed automatic initialization to prevent config conflicts
+# # set_training_phase("pretraining")  # LoRA Domain Adaptation: Users must explicitly set phase
+# OPAL_MODEL_CONFIG = _PHASE_CONFIGS["pretraining"].copy()  # LoRA Domain Adaptation: Set default manually
+# TRAINING_CONFIG = _TRAINING_CONFIGS["pretraining"].copy() if not torch.backends.mps.is_available() else {
+#     **_TRAINING_CONFIG_MPS,
+#     "batch_size": 2,  # Slightly larger for pretraining
+# }  # LoRA Domain Adaptation: Set training config default

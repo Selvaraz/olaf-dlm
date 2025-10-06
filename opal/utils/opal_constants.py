@@ -8,7 +8,7 @@ class OpalConstants:
     
     # RUNTIME PATHS
     #SYSTEM_ROOT_PATH = "/Users/selvmani/Runs"
-    SYSTEM_ROOT_PATH= ""
+    SYSTEM_ROOT_PATH= "/home/selvaraj"
     RUNTIME_ROOT_PATH = f"{SYSTEM_ROOT_PATH}/workspace"
     CHECKPOINT_DIR = f"{RUNTIME_ROOT_PATH}/checkpoints"
     TENSORBOARD_RUN_DIR = f"{CHECKPOINT_DIR}/runs"
@@ -24,9 +24,9 @@ class OpalConstants:
     PRETOKENIZED_DATA_PATH = ""
     # PRETRAIN_DATA_PATH = f"{DATA_DIR}/consolidated_ascii_files"
     # /workspace/dataset/unified_data_corpus.txt
-    PRETRAIN_DATA_PATH = f"{DATA_DIR}/unified_data_corpus.txt"
-    TOKENIZER_MODEL_PATH = f"{RUNTIME_ROOT_PATH}/tokenizer/olaf_tokenizer_09062025_45M.model"
-    FINETUNE_DATA_PATH = f"{DATA_DIR}/QA_finetune_final.jsonl"
+    PRETRAIN_DATA_PATH = f"{DATA_DIR}/olaf_unified_corpus_12G_10052025.txt"
+    TOKENIZER_MODEL_PATH = f"{RUNTIME_ROOT_PATH}/tokenizer/olaf_11G_unified_unigram_45M.model"
+    #FINETUNE_DATA_PATH = f"{DATA_DIR}/QA_finetune_final.jsonl"
 
     
 
