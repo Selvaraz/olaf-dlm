@@ -216,6 +216,18 @@ class Opal:
 
         # Print out chosen parameters for transparency
         print(f"Creating DataLoader with {num_workers} workers, batch_size={batch_size}, prefetch_factor=4")
+        
+        # Memory optimization for very large datasets
+        if isinstance(txt, torch.Tensor) and txt.numel() > 1e9:  # >1B tokens
+            print(f"🔧 Large corpus detected ({txt.numel():,} tokens) - applying memory optimizations")
+            # Reduce prefetch factor for very large datasets to save memory
+            prefetch_factor = 2 if num_workers > 0 else None
+            # Force persistent_workers=False for large datasets to prevent memory leaks
+            persistent_workers_setting = False
+            print(f"🔧 Adjusted settings: prefetch_factor={prefetch_factor}, persistent_workers={persistent_workers_setting}")
+        else:
+            prefetch_factor = 4 if num_workers > 0 else None
+            persistent_workers_setting = self.config["persistent_workers"]
 
         dataset = OpalDataset(
             txt=txt,
@@ -233,8 +245,8 @@ class Opal:
             drop_last=drop_last,
             num_workers=num_workers,
             pin_memory=True, 
-            persistent_workers=self.config["persistent_workers"],
-            prefetch_factor= 4 if num_workers > 0 else None
+            persistent_workers=persistent_workers_setting,
+            prefetch_factor=prefetch_factor
         )
     
     def text_to_token_ids(self, text):
