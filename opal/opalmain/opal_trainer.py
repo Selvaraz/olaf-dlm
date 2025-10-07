@@ -612,7 +612,10 @@ class Opal:
             warmup_steps = max(1, int(total_steps * 0.03))  # SFT: Verion_1.0
         else:
             # Pretraining: standard warmup (5% of total steps)
-            warmup_steps = int(total_steps * 0.05)
+            # For very large corpora (e.g., 3B tokens, 600k+ steps), a 5% warmup (30k+ steps) may be excessive.
+            # Typical recommendations for large-scale training are 1%–3% warmup.
+            # You can use 0.01 (1%) or 0.02 (2%) for faster ramp-up.
+            warmup_steps = max(1, int(total_steps * 0.01))  # Use 2% warmup for large datasets
         
         print(f"🚀 === TRAINING PIPELINE INITIALIZATION ===")
         print(f"📊 Mode: {'FINE-TUNING' if self.is_finetune else 'PRETRAINING'}")

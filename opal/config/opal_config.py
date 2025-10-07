@@ -155,7 +155,7 @@ _TRAINING_CONFIG_MPS = {
 _PHASE_CONFIGS = {
     "pretraining": {
         **_GPT_CONFIG_OPAL_45M,
-        "learning_rate": 3e-4,        # Higher LR for initial pretraining
+        "learning_rate": 2e-4,        # Higher LR for initial pretraining
         "num_epoch": 5,               # 1-2 epochs sufficient for 5GB
         "early_stopping_patience": 3,
         "weight_decay": 0.1,
