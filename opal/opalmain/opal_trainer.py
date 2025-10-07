@@ -1835,7 +1835,7 @@ class Opal:
         weight_decay=0.1,
         eval_freq=5,
         eval_iter=5,
-        start_context="Help me find why 'show ip route' CLI fails",
+        start_context="mDNS protocol is used for",
         log_to_tensorboard=True,
         log_to_wandb=False,
         wandb_project="opal-training",
