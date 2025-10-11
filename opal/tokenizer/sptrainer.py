@@ -43,6 +43,13 @@ except Exception:  # pragma: no cover - graceful fallback if tqdm missing
 # The tokenizer will add the 
 # --bos_piece='<s>' --eos_piece='</s>', unk_piece='<unk>', pad_piece='<pad>'
 # All the router/switch/.. prompts will be replaced with device
+# TODO: 
+#   In future add special token for new line "\n"
+#   Add special token for indentation (2 spaces) "
+#   Add a token for <|reasoning|> and <|end-reasoning|>
+#   Add a token for <|summary|> and <|end-summary|>
+
+
 user_defined_symbols = [
         "```",
     "```cisco-config",
@@ -53,6 +60,8 @@ user_defined_symbols = [
     "```log",
     "```tcl",
     "<|answer|>",
+    "<|command|>",
+    "<|end-command|>",
     "<|doc|>",
     "<|end-answer|>",
     "<|end-question|>",
@@ -61,8 +70,12 @@ user_defined_symbols = [
     "<|ip|>",
     "<|mac|>",
     "<|question|>",
+    "<|reasoning|>",
+    "<|end-reasoning|>",
     "<|ssid|>",
     "<|ssid-name|>",
+    "<|summary|>",
+    "<|end-summary|>",
     "<|system|>",
     "<|timestamp|>",
     "<|url|>",
@@ -262,17 +275,17 @@ def train_tokenizer(
         pad_id=0,
         bos_id=1,
         eos_id=2,
-        byte_fallback=False,
+        byte_fallback=True,
         hard_vocab_limit=False,  # Enforce strict vocab limit for small models
         train_extremely_large_corpus=True,  # Better for smaller datasets/models
         user_defined_symbols=user_defined_symbols,
         add_dummy_prefix=False,  # Keep disabled to prevent symbol splitting
-        treat_whitespace_as_suffix=False,  # Good for symbol preservation
+        treat_whitespace_as_suffix=True,  # Good for symbol preservation
         allow_whitespace_only_pieces=True,  # Allow whitespace tokens
         split_digits=False,  # Preserve numeric symbols like "802.1X"
         normalization_rule_name="nfkc",  # Unicode normalization without case folding
-        remove_extra_whitespaces=True,  # Clean up training data
-        shuffle_input_sentence=False,  # Better training diversity
+        remove_extra_whitespaces=False,  # Clean up training data
+        shuffle_input_sentence=True,  # Better training diversity
         seed_sentencepiece_size=1000000,  # Reasonable seed size
         shrinking_factor=0.75,  # Help with vocabulary pruning
         num_threads=16,  # Utilize multiple cores
