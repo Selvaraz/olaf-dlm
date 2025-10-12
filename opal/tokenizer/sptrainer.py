@@ -38,19 +38,25 @@ except Exception:  # pragma: no cover - graceful fallback if tqdm missing
 
 # Best practices of using the tokens in the pretrain corpus
 # 1. Use <|doc|> to delimit documents
-# 5. Use consistent casing and formatting for all tokens
+# 2. Use consistent casing and formatting for all tokens
+# 3. Explicit whitespace tokens (\n, \t) prevent hex encoding
+# 4. User-defined symbols preserve domain-specific terms
 
 # The tokenizer will add the 
 # --bos_piece='<s>' --eos_piece='</s>', unk_piece='<unk>', pad_piece='<pad>'
 # All the router/switch/.. prompts will be replaced with device
-# TODO: 
-#   In future add special token for new line "\n"
-#   Add special token for indentation (2 spaces) "
-#   Add a token for <|reasoning|> and <|end-reasoning|>
-#   Add a token for <|summary|> and <|end-summary|>
+
+# ✅ COMPLETED IMPROVEMENTS:
+#   ✅ Added explicit newline "\n" and tab "\t" tokens
+#   ✅ Added <|reasoning|> and <|end-reasoning|> tokens  
+#   ✅ Added <|summary|> and <|end-summary|> tokens
+#   ✅ Disabled byte_fallback to prevent hex encoding
+#   ✅ Set character_coverage=1.0 for complete character inclusion
 
 
 user_defined_symbols = [
+        "\n",  # Explicit newline token
+        "\t",  # Explicit tab token
         "```",
     "```cisco-config",
     "```cisco-exec",
@@ -269,26 +275,27 @@ def train_tokenizer(
         sentence_iterator=_line_iterator(input_file, show_progress),
         model_prefix=full_model_prefix,
         vocab_size=vocab_size,
-        character_coverage=0.9995,  # Slightly less than 1.0 for better efficiency
+        character_coverage=1.0,  # Include ALL characters including whitespace
         model_type=model_type,
         unk_id=3,
         pad_id=0,
         bos_id=1,
         eos_id=2,
-        byte_fallback=True,
+        byte_fallback=False,  # Disable byte fallback to prevent hex encoding
         hard_vocab_limit=False,  # Enforce strict vocab limit for small models
         train_extremely_large_corpus=True,  # Better for smaller datasets/models
         user_defined_symbols=user_defined_symbols,
+        input_sentence_size=70_000_000,  # Use a large sample of sentences
         add_dummy_prefix=False,  # Keep disabled to prevent symbol splitting
-        treat_whitespace_as_suffix=True,  # Good for symbol preservation
+        treat_whitespace_as_suffix=False,  # Preserve whitespace as tokens
         allow_whitespace_only_pieces=True,  # Allow whitespace tokens
-        split_digits=False,  # Preserve numeric symbols like "802.1X"
-        normalization_rule_name="nfkc",  # Unicode normalization without case folding
-        remove_extra_whitespaces=False,  # Clean up training data
+        split_digits=False,  # Keep numeric content intact (chapter names, versions, IPs, etc.)
+        normalization_rule_name="nmt_nfkc",  # Preserve whitespace structure
+        remove_extra_whitespaces=False,  # Keep all whitespace
         shuffle_input_sentence=True,  # Better training diversity
-        seed_sentencepiece_size=1000000,  # Reasonable seed size
+        seed_sentencepiece_size=2000000,  # Reasonable seed size
         shrinking_factor=0.75,  # Help with vocabulary pruning
-        num_threads=16,  # Utilize multiple cores
+        num_threads=24,  # Utilize multiple cores
         max_sentencepiece_length=20,  # Increased to accommodate longer user symbols
     )
     duration = time.time() - start_time
