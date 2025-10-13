@@ -14,7 +14,6 @@ class OpalConstants:
     CHECKPOINT_NAME = "checkpoint-latest-pretrain.pt"
     TENSORBOARD_RUN_DIR = f"{CHECKPOINT_DIR}/runs"
     CHECKPOINT_PATH = f"{CHECKPOINT_DIR}/{CHECKPOINT_NAME}"
-    CHECKPOINT_NAME 
     
 
     ## INPUTS
@@ -23,12 +22,12 @@ class OpalConstants:
     FINETUNE_TEST_DATA_PATH = f"{DATA_DIR}/unified_finetune_corpus.jsonl"
     # /workspace/dataset/pretokenized_unified_data/olaf_tokenizer_09062025_45M.pt
     #PRETOKENIZED_DATA_PATH = f"{DATA_DIR}/pretokenized_unified_data/olaf_tokenizer_09062025_45M.pt"
-    DATASET_FILE_NAME = "olaf_unified_corpus_12G_10052025"
+    DATASET_FILE_NAME = "olaf_sentencepiece_unigram_45M_10112025"
     PRETOKENIZED_DATA_PATH = f"{DATA_DIR}/{DATASET_FILE_NAME}.pt"
     # PRETRAIN_DATA_PATH = f"{DATA_DIR}/consolidated_ascii_files"
     # /workspace/dataset/unified_data_corpus.txt
     PRETRAIN_DATA_PATH = f"{DATA_DIR}/{DATASET_FILE_NAME}.txt"
-    TOKENIZER_MODEL_PATH = f"{RUNTIME_ROOT_PATH}/tokenizer/olaf_11G_unified_unigram_45M.model"
+    TOKENIZER_MODEL_PATH = f"{RUNTIME_ROOT_PATH}/tokenizer/olaf_sentencepiece_unigram_80MSaple_45M_10112025.model"
     #FINETUNE_DATA_PATH = f"{DATA_DIR}/QA_finetune_final.jsonl"
 
     
