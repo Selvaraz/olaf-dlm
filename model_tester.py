@@ -238,6 +238,193 @@ def format_alternatives_table(token_alternatives, show_table=True):
     
     return "\n".join(table_lines)
 
+def generate_alternative_paths(token_alternatives, tokenizer):
+    """
+    Generate alternative text variations by selecting different probability ranks
+    
+    Args:
+        token_alternatives (list): List of alternatives for each token position
+        tokenizer: The tokenizer for decoding
+    
+    Returns:
+        dict: Dictionary with alternative generations
+    """
+    if not token_alternatives:
+        return {}
+    
+    alternative_paths = {}
+    
+    # Generate 5 alternative paths by selecting 2nd, 3rd, 4th, 5th, 6th highest probability tokens
+    for rank in range(2, 7):  # ranks 2-6 (2nd highest to 6th highest)
+        alternative_tokens = []
+        
+        for alternatives in token_alternatives:
+            if not alternatives or len(alternatives) < rank:
+                # If we don't have enough alternatives, skip this position
+                continue
+            
+            # Sort by probability (descending) and pick the token at the specified rank
+            sorted_alts = sorted(alternatives, key=lambda x: x[1], reverse=True)
+            if len(sorted_alts) >= rank:
+                # Get the token at this rank (rank-1 for 0-based indexing)
+                token_text, prob, _ = sorted_alts[rank-1]
+                alternative_tokens.append((token_text, prob))
+        
+        # Decode the alternative path
+        if alternative_tokens:
+            alt_text_parts = [token for token, _ in alternative_tokens]
+            alt_text = "".join(alt_text_parts)
+            
+            # Format with probabilities
+            alt_text_with_probs = "".join([f"{token}[{prob:.3f}]" for token, prob in alternative_tokens])
+            
+            alternative_paths[f"rank_{rank}_path"] = {
+                'text': alt_text.strip(),
+                'text_with_probs': alt_text_with_probs,
+                'rank': rank,
+                'description': f'{rank}{"nd" if rank==2 else "rd" if rank==3 else "th"} highest probability path'
+            }
+    
+    return alternative_paths
+
+def generate_temperature_sweep(model, tokenizer, prompt, config, device, base_params, num_variations=10):
+    """
+    Generate multiple text variations with incremental temperature values
+    
+    Args:
+        model: The loaded model
+        tokenizer: The loaded tokenizer
+        prompt (str): Input prompt
+        config (dict): Model configuration
+        device (str): Device to use
+        base_params (dict): Base generation parameters
+        num_variations (int): Number of temperature variations to generate
+    
+    Returns:
+        list: List of dictionaries with temperature, text, and probabilities
+    """
+    base_temp = base_params.get('temperature', 0.8)
+    temp_increment = 0.05  # 0.05 increment for temperature
+    
+    # Generate temperature values starting from base_temp
+    temperatures = [round(base_temp + (i * temp_increment), 2) for i in range(num_variations)]
+    
+    sweep_results = []
+    
+    # Generate quietly without verbose output
+    for temp in temperatures:
+        # Create modified parameters for this temperature
+        temp_params = base_params.copy()
+        temp_params['temperature'] = temp
+        temp_params['show_probabilities'] = True  # Ensure we get probabilities
+        temp_params['show_alternatives'] = False  # Disable alternatives for cleaner output
+        temp_params['enable_temp_sweep'] = False  # Prevent recursive temperature sweep
+        temp_params['max_new_tokens'] = min(base_params.get('max_new_tokens', 512), 50)  # Limit for table display
+        
+        # Generate text with this temperature (suppress output temporarily)
+        import io
+        import sys
+        
+        # Capture stdout to suppress verbose output
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        
+        try:
+            full_text, generated_text, metadata = generate_with_params(
+                model, tokenizer, prompt, config, device, **temp_params
+            )
+        finally:
+            # Restore stdout
+            sys.stdout = old_stdout
+        
+        # Extract probability information
+        prob_summary = "N/A"
+        if metadata.get('token_probabilities'):
+            # Get first few token probabilities for summary
+            first_probs = metadata['token_probabilities'][:5]  # First 5 tokens
+            prob_values = [f"{prob:.3f}" for _, prob in first_probs]
+            prob_summary = ", ".join(prob_values)
+            if len(metadata['token_probabilities']) > 20:
+                prob_summary += "..."
+        
+        sweep_results.append({
+            'temperature': temp,
+            'generated_text': generated_text.strip(),
+            'full_text': full_text.strip(),
+            'probabilities': prob_summary,
+            'token_count': metadata.get('generated_length', 0),
+            'stopped_reason': metadata.get('stopped_reason', 'unknown')
+        })
+    
+    return sweep_results
+
+def format_temperature_sweep_table(sweep_results, prompt):
+    """
+    Format temperature sweep results into a nice table
+    
+    Args:
+        sweep_results (list): List of temperature sweep results
+        prompt (str): The original prompt used for generation
+    
+    Returns:
+        str: Formatted table string
+    """
+    if not sweep_results:
+        return "\n🌡️ No temperature sweep results available\n"
+    
+    # Calculate column widths
+    temp_width = 12
+    text_width = 50  # Fixed width for readability
+    prob_width = 30
+    
+    # Create table
+    table_lines = []
+    
+    # Header
+    header = f"{'Temperature':<{temp_width}} | {'Generated Text':<{text_width}} | {'Probabilities':<{prob_width}}"
+    separator = "-" * len(header)
+    
+    table_lines.append("")
+    table_lines.append("🌡️ TEMPERATURE SWEEP RESULTS")
+    table_lines.append("=" * 150)
+    table_lines.append(header)
+    table_lines.append(separator)
+    
+    # Data rows
+    for result in sweep_results:
+        temp_str = f"{result['temperature']:.2f}"
+        
+        # Truncate text if too long
+        text = result['generated_text']
+        if len(text) > text_width:
+            text = text[:text_width-3] + "..."
+        
+        # Truncate probabilities if too long
+        probs = result['probabilities']
+        if len(probs) > prob_width:
+            probs = probs[:prob_width-3] + "..."
+        
+        line = f"{temp_str:<{temp_width}} | {text:<{text_width}} | {probs:<{prob_width}}"
+        table_lines.append(line)
+    
+    table_lines.append(separator)
+    table_lines.append(f"Total variations: {len(sweep_results)}")
+    table_lines.append(f"All Texts For The varied temperatures are ... : ")
+    table_lines.append(f"Prompt: '{prompt}'")
+    table_lines.append("")
+    for result in sweep_results:
+        table_lines.append(f"  [Temp {result['temperature']:.2f}] <::> {result['generated_text']}")
+    table_lines.append("")
+    
+    # Add analysis summary
+    table_lines.append("📊 TEMPERATURE ANALYSIS:")
+    table_lines.append(f"   • Lowest temp ({sweep_results[0]['temperature']:.2f}): Most deterministic")
+    table_lines.append(f"   • Highest temp ({sweep_results[-1]['temperature']:.2f}): Most creative/random")
+    table_lines.append(f"   • Average tokens generated: {sum(r['token_count'] for r in sweep_results) / len(sweep_results):.1f}")
+    table_lines.append("")
+    
+    return "\n".join(table_lines)
+
 def nucleus_sampling(logits, top_k=None, top_p=None, temperature=1.0, filter_value=-float('Inf')):
     """
     Apply top-k and/or nucleus (top-p) filtering to logits
@@ -361,6 +548,9 @@ def generate_with_params(model, tokenizer, prompt, config, device, **gen_params)
                             else:
                                 next_token_logits[token_id] *= repetition_penalty
                 
+                # Calculate original probabilities (before filtering) for true model confidence
+                original_probs = torch.softmax(next_token_logits, dim=-1)
+                
                 # Apply sampling filters
                 if do_sample:
                     filtered_logits = nucleus_sampling(
@@ -369,19 +559,18 @@ def generate_with_params(model, tokenizer, prompt, config, device, **gen_params)
                         top_p=top_p, 
                         temperature=temperature
                     )
-                    probs = torch.softmax(filtered_logits, dim=-1)
-                    next_token = torch.multinomial(probs, 1).item()
-                    # Get the probability of the selected token
-                    token_prob = probs[next_token].item()
+                    filtered_probs = torch.softmax(filtered_logits, dim=-1)
+                    next_token = torch.multinomial(filtered_probs, 1).item()
+                    # Get the TRUE probability of the selected token (from original distribution)
+                    token_prob = original_probs[next_token].item()
                 else:
                     # Greedy decoding
-                    probs = torch.softmax(next_token_logits, dim=-1)
                     next_token = torch.argmax(next_token_logits).item()
                     # Get the probability of the selected token
-                    token_prob = probs[next_token].item()
+                    token_prob = original_probs[next_token].item()
                 
-                # Get top-6 alternatives (including the selected token)
-                top_probs, top_indices = torch.topk(probs, min(6, probs.size(-1)))
+                # Get top-6 alternatives from ORIGINAL probabilities (shows true model confidence)
+                top_probs, top_indices = torch.topk(original_probs, min(6, original_probs.size(-1)))
                 alternatives = []
                 for i, (prob, idx) in enumerate(zip(top_probs, top_indices)):
                     token_text = tokenizer.decode([idx.item()])
@@ -419,6 +608,22 @@ def generate_with_params(model, tokenizer, prompt, config, device, **gen_params)
             metadata['alternatives_table'] = format_alternatives_table(
                 metadata['token_alternatives'], show_table=True
             )
+        
+        # Generate alternative text variations by selecting different probability ranks
+        if show_alternatives and metadata.get('token_alternatives'):
+            metadata['alternative_generations'] = generate_alternative_paths(
+                metadata['token_alternatives'], tokenizer
+            )
+        
+        # Generate temperature sweep if requested
+        enable_temp_sweep = gen_params.get('enable_temp_sweep', False)  # Default disabled
+        if enable_temp_sweep:
+            print(f"\n🌡️ Generating temperature sweep variations...")
+            temp_sweep_results = generate_temperature_sweep(
+                model, tokenizer, prompt, config, device, gen_params, num_variations=10
+            )
+            metadata['temperature_sweep'] = temp_sweep_results
+            metadata['temperature_sweep_table'] = format_temperature_sweep_table(temp_sweep_results, prompt)
         
         return full_text, generated_text, metadata
         
@@ -512,7 +717,9 @@ def parse_generation_params(param_string):
                 'probabilities': 'show_probabilities',
                 'show_alts': 'show_alternatives',
                 'alternatives': 'show_alternatives',
-                'show_alternatives': 'show_alternatives'
+                'show_alternatives': 'show_alternatives',
+                'temp_sweep': 'enable_temp_sweep',
+                'enable_temp_sweep': 'enable_temp_sweep'
             }
             
             if key in param_map:
@@ -528,6 +735,8 @@ def parse_generation_params(param_string):
                 elif param_key == 'show_probabilities':
                     params[param_key] = value.lower() in ('true', '1', 'yes')
                 elif param_key == 'show_alternatives':
+                    params[param_key] = value.lower() in ('true', '1', 'yes')
+                elif param_key == 'enable_temp_sweep':
                     params[param_key] = value.lower() in ('true', '1', 'yes')
                 else:
                     params[param_key] = value
@@ -647,6 +856,7 @@ def interactive_mode(model, tokenizer, config, device):
     print("  presets            - List available presets")
     print("  probs on/off       - Toggle probability display")
     print("  alts on/off        - Toggle alternatives table display")
+    print("  temp_sweep on/off  - Toggle temperature sweep analysis")
     print("  help               - Show this help")
     print("  quit/exit          - Exit")
     print("=" * 50)
@@ -660,7 +870,8 @@ def interactive_mode(model, tokenizer, config, device):
         'repetition_penalty': 1.05,
         'do_sample': True,
         'show_probabilities': True,
-        'show_alternatives': True
+        'show_alternatives': True,
+        'enable_temp_sweep': False
     }
     
     presets = print_generation_presets()
@@ -673,7 +884,7 @@ def interactive_mode(model, tokenizer, config, device):
                 break
             elif user_input.lower() == 'help':
                 print("\nParameter format: temp=0.8,top_k=50,top_p=0.9,rep_penalty=1.1,max_tokens=256")
-                print("Available parameters: temp, top_k, top_p, rep_penalty, max_tokens, sample, show_probs, show_alts")
+                print("Available parameters: temp, top_k, top_p, rep_penalty, max_tokens, sample, show_probs, show_alts, temp_sweep")
                 continue
             elif user_input.lower() == 'presets':
                 print_generation_presets()
@@ -704,6 +915,17 @@ def interactive_mode(model, tokenizer, config, device):
                     print("✅ Alternatives table display disabled")
                 else:
                     print("❌ Use 'alts on' or 'alts off'")
+                continue
+            elif user_input.lower().startswith('temp_sweep '):
+                toggle = user_input[11:].strip().lower()
+                if toggle in ['on', 'true', '1', 'yes']:
+                    current_params['enable_temp_sweep'] = True
+                    print("✅ Temperature sweep analysis enabled")
+                elif toggle in ['off', 'false', '0', 'no']:
+                    current_params['enable_temp_sweep'] = False
+                    print("✅ Temperature sweep analysis disabled")
+                else:
+                    print("❌ Use 'temp_sweep on' or 'temp_sweep off'")
                 continue
             elif user_input.lower().startswith('preset '):
                 preset_name = user_input[7:].strip()
@@ -757,6 +979,24 @@ def interactive_mode(model, tokenizer, config, device):
                 # Show alternatives table if available
                 if metadata.get('alternatives_table'):
                     print(metadata['alternatives_table'])
+                
+                # Show alternative generation paths if available
+                if metadata.get('alternative_generations'):
+                    print("\n🎲 ALTERNATIVE GENERATION PATHS")
+                    print("=" * 50)
+                    alt_gens = metadata['alternative_generations']
+                    for rank in range(2, 7):
+                        path_key = f"rank_{rank}_path"
+                        if path_key in alt_gens:
+                            path = alt_gens[path_key]
+                            print(f"🔸 {path['description']}:")
+                            print(f"   Text: '{path['text']}'")
+                            print(f"   With probabilities: '{path['text_with_probs']}'")
+                            print()
+                
+                # Show temperature sweep results if available
+                if metadata.get('temperature_sweep_table'):
+                    print(metadata['temperature_sweep_table'])
             else:
                 print(f"❌ Generation failed: {metadata['error']}")
             
@@ -947,7 +1187,7 @@ def guided_examples_mode():
         print("  - greedy: Most likely tokens (no sampling)")
         print()
         print("CUSTOM PARAMETERS:")
-        print("  Format: temp=0.8,top_k=50,top_p=0.9,rep_penalty=1.1,max_tokens=256,show_probs=true,show_alts=true")
+        print("  Format: temp=0.8,top_k=50,top_p=0.9,rep_penalty=1.1,max_tokens=256,show_probs=true,show_alts=true,temp_sweep=true")
         print("  - temp/temperature: Randomness (0.1-2.0)")
         print("  - top_k: Keep top K tokens (1-vocab_size)")
         print("  - top_p: Nucleus sampling threshold (0.1-1.0)")
@@ -956,6 +1196,7 @@ def guided_examples_mode():
         print("  - sample: Enable sampling (true/false)")
         print("  - show_probs: Show token probabilities (true/false)")
         print("  - show_alts: Show alternative tokens table (true/false)")
+        print("  - temp_sweep: Show temperature sweep analysis (true/false)")
 
 def main():
     parser = argparse.ArgumentParser(description="OPAL Fine-tuned Model Tester - Unified Script")
@@ -976,6 +1217,8 @@ def main():
                        help="Run guided examples mode")
     parser.add_argument("--validate", "-v", action="store_true",
                        help="Validate setup and exit")
+    parser.add_argument("--temperature-sweep", action="store_true",
+                       help="Enable temperature sweep analysis")
     
     args = parser.parse_args()
     
@@ -1042,7 +1285,8 @@ def main():
             'repetition_penalty': 1.05,
             'do_sample': True,
             'show_probabilities': True,
-            'show_alternatives': True
+            'show_alternatives': True,
+            'enable_temp_sweep': False
         }
         
         # Apply preset if specified
@@ -1061,6 +1305,11 @@ def main():
             custom_params = parse_generation_params(args.params)
             gen_params.update(custom_params)
             print(f"✅ Custom parameters: {custom_params}")
+        
+        # Enable temperature sweep if flag is provided
+        if args.temperature_sweep:
+            gen_params['enable_temp_sweep'] = True
+            print(f"✅ Temperature sweep enabled")
         
         # Generate
         print(f"\n🚀 Generating for: '{args.prompt}'")
@@ -1081,6 +1330,24 @@ def main():
             # Show alternatives table if available
             if metadata.get('alternatives_table'):
                 print(metadata['alternatives_table'])
+            
+            # Show alternative generation paths if available
+            if metadata.get('alternative_generations'):
+                print("\n🎲 ALTERNATIVE GENERATION PATHS")
+                print("=" * 50)
+                alt_gens = metadata['alternative_generations']
+                for rank in range(2, 7):
+                    path_key = f"rank_{rank}_path"
+                    if path_key in alt_gens:
+                        path = alt_gens[path_key]
+                        print(f"🔸 {path['description']}:")
+                        print(f"   Text: '{path['text']}'")
+                        print(f"   With probabilities: '{path['text_with_probs']}'")
+                        print()
+            
+            # Show temperature sweep results if available
+            if metadata.get('temperature_sweep_table'):
+                print(metadata['temperature_sweep_table'])
             
             print(f"\n📊 Stopped: {metadata['stopped_reason']}")
         else:
