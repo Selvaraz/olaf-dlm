@@ -226,6 +226,12 @@ def freeze_base_model_weights(model: nn.Module, verbose: bool = True) -> int:
             trainable_count += param.numel()
             if verbose:
                 print(f"LoRA Domain Adaptation: Keeping trainable: {name} ({param.numel()} params)")
+        elif 'out_head' in name or 'out_proj' in name:
+            # LoRA Domain Adaptation: Keep output layers trainable for gradient flow
+            param.requires_grad = True
+            trainable_count += param.numel()
+            if verbose:
+                print(f"LoRA Domain Adaptation: Keeping output layer trainable: {name} ({param.numel()} params)")
         else:
             # LoRA Domain Adaptation: Freeze base model parameters
             param.requires_grad = False
