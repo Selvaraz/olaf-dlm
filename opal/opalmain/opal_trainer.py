@@ -578,8 +578,16 @@ class Opal:
         use_mixed_precision = TRAINING_CONFIG.get("mixed_precision", False)
         max_grad_norm = self.config.get("max_grad_norm", 1.0)
         
-        # LoRA Domain Adaptation: Proper gradient accumulation based on training phase
-        has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
+        # LoRA Domain Adaptation: Detect LoRA based on config and model state
+        # For DAPT: Check config first (we're adding LoRA to pretrained model)
+        # For other modes: Check both config and model state
+        config_has_lora = self.config.get('use_lora', False)
+        model_has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
+        has_lora = config_has_lora or model_has_lora
+        
+        # Debug logging for LoRA detection
+        if self.is_dapt:
+            print(f"🎯 LoRA DAPT Detection: config_lora={config_has_lora}, model_lora={model_has_lora}, final_lora={has_lora}")
         
         # Optional-LoRA-Finetune: Prioritize LoRA behavior when enabled (for both domain adaptation and LoRA fine-tuning)
         if has_lora:
@@ -746,11 +754,14 @@ class Opal:
 
                     global_step += 1
                     
-                    # Generate sample every 2500 iterations to monitor quality (AFTER increment)
-                    if global_step > 0 and global_step % 1000 == 0:
-                        print(f"\n🎯 === GENERATION SAMPLE AT STEP {global_step} ===")
+                    # Generate sample frequency adjusted for training phase
+                    # LoRA Domain Adaptation: Less frequent generation (every 9000 steps) for efficiency  
+                    # Regular training: More frequent generation (every 5000 steps) for monitoring
+                    sample_freq = 9000 if (has_lora and not self.is_finetune) else 5000
+                    if global_step > 0 and global_step % sample_freq == 0:
+                        print(f"\n🎯 === GENERATION SAMPLE AT STEP {global_step} (freq={sample_freq}) ===")
                         
-                        # LoRA Domain Adaptation: Phase-specific generation logic
+                        # LoRA Domain Adaptation: Phase-specific generation logic with adaptive frequency
                         # Optional-LoRA-Finetune: Prioritize LoRA behavior when enabled
                         if has_lora and not self.is_finetune:
                             print("\n🎯 LoRA Domain Adaptation: Generating sample...")
@@ -1411,8 +1422,10 @@ class Opal:
         Returns:
             str: Path to the saved checkpoint file.
         """
-        # LoRA Domain Adaptation: Check if model has LoRA adapters
-        has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
+        # LoRA Domain Adaptation: Check if model has LoRA adapters (config or model state)
+        config_has_lora = config.get('use_lora', False)
+        model_has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
+        has_lora = config_has_lora or model_has_lora
         
         checkpoint = {
             "model_state_dict": model.state_dict(),
@@ -1569,6 +1582,7 @@ class Opal:
         if (not os.path.isfile(os.path.realpath(checkpoint_path))) or start_fresh:
             print(f"⚠️ Checkpoint {checkpoint_path} not found (or) start_fresh is requested. Creating new model.")
             model = model_class(self.config).to(device)
+            model_config = self.config  # Use current config for new model
         else:
             print(f"✅ Model loaded from {checkpoint_path}")
             checkpoint = torch.load(os.path.realpath(checkpoint_path), map_location=device)
@@ -1592,9 +1606,25 @@ class Opal:
             else:
                 print("📊 No loss history found in checkpoint")
             
-            # Load model with saved config to ensure same architecture
-            config = checkpoint["config"]
-            model = model_class(config).to(device)
+            # Load model with appropriate config based on training mode
+            checkpoint_config = checkpoint["config"]
+            
+            # LoRA Domain Adaptation: Use current config (with LoRA) for DAPT, checkpoint config otherwise
+            if self.is_dapt:
+                print("🎯 LoRA DAPT: Using current config (with LoRA) to create model architecture")
+                model_config = self.config  # Use current config which has use_lora=True
+                # Preserve critical architecture params from checkpoint
+                model_config.update({
+                    'vocab_size': checkpoint_config.get('vocab_size'),
+                    'emb_dim': checkpoint_config.get('emb_dim'), 
+                    'n_layers': checkpoint_config.get('n_layers'),
+                    'n_heads': checkpoint_config.get('n_heads'),
+                    'context_length': checkpoint_config.get('context_length'),
+                })
+            else:
+                model_config = checkpoint_config
+                
+            model = model_class(model_config).to(device)
             missing, unexpected = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
             
             # ✅ CRITICAL DEBUG: Check for vocab size mismatches in loaded model
@@ -1642,7 +1672,7 @@ class Opal:
             checkpoint["epoch"] if "epoch" in checkpoint else 0,
             checkpoint["train_losses"] if "train_losses" in checkpoint else [],
             checkpoint["val_losses"] if "val_losses" in checkpoint else [],
-            config,
+            model_config,  # Return the config used to create the model
         )
 
     def _plot_and_save_losses(epochs_seen, tokens_seen, train_losses, val_losses, save_path):
@@ -1905,8 +1935,10 @@ class Opal:
         print(f"Creating adaptive optimizer with learning rate: {lr}, {self.config.get('learning_rate', 0)}")
         optimizer = None
 
-        # LoRA Domain Adaptation: Check if model has LoRA adapters
-        has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
+        # LoRA Domain Adaptation: Check if model has LoRA adapters (config or model state)
+        config_has_lora = config.get('use_lora', False)
+        model_has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
+        has_lora = config_has_lora or model_has_lora
         if has_lora:
             print("🎯 LoRA Domain Adaptation: Creating optimizer for LoRA parameters only")
             
