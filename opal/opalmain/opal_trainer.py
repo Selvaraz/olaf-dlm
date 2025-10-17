@@ -1627,6 +1627,49 @@ class Opal:
             model = model_class(model_config).to(device)
             missing, unexpected = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
             
+            # LoRA Domain Adaptation: Handle weight transfer from standard to LoRA-injected layers
+            if self.is_dapt and hasattr(model, 'is_lora_enabled') and model.is_lora_enabled():
+                print("🎯 LoRA DAPT: Transferring weights from standard layers to LoRA-injected layers...")
+                
+                # Transfer weights from unexpected keys (standard layers) to missing keys (LoRA layers)
+                checkpoint_state = checkpoint["model_state_dict"]
+                transferred_count = 0
+                
+                # Create mapping from unexpected (standard) to missing (LoRA) keys
+                for missing_key in list(missing):
+                    if '.base_linear.weight' in missing_key:
+                        # Map: transformers_block.0.mhAttention.Wq.base_linear.weight
+                        # To:  transformers_block.0.mhAttention.Wq.weight
+                        standard_key = missing_key.replace('.base_linear.weight', '.weight')
+                        if standard_key in unexpected and standard_key in checkpoint_state:
+                            # Get the target parameter in the model
+                            keys = missing_key.split('.')
+                            target = model
+                            for key in keys[:-1]:
+                                target = getattr(target, key)
+                            # Set the weight
+                            target.weight.data.copy_(checkpoint_state[standard_key])
+                            transferred_count += 1
+                            print(f"    Transferred: {standard_key} → {missing_key}")
+                    
+                    elif '.base_linear.bias' in missing_key:
+                        # Map: transformers_block.0.mhAttention.Wq.base_linear.bias
+                        # To:  transformers_block.0.mhAttention.Wq.bias
+                        standard_key = missing_key.replace('.base_linear.bias', '.bias')
+                        if standard_key in unexpected and standard_key in checkpoint_state:
+                            # Get the target parameter in the model
+                            keys = missing_key.split('.')
+                            target = model
+                            for key in keys[:-1]:
+                                target = getattr(target, key)
+                            # Set the bias
+                            target.bias.data.copy_(checkpoint_state[standard_key])
+                            transferred_count += 1
+                            print(f"    Transferred: {standard_key} → {missing_key}")
+                
+                print(f"🎯 LoRA DAPT: Successfully transferred {transferred_count} weights to LoRA base layers")
+                print(f"🎯 LoRA DAPT: LoRA adapter weights (lora_A, lora_B) initialized with zeros - ready for training!")
+            
             # ✅ CRITICAL DEBUG: Check for vocab size mismatches in loaded model
             print(f"🔍 CHECKPOINT LOADING DEBUG:")
             print(f"   Missing keys: {len(missing)} - {missing[:5] if missing else 'None'}")
