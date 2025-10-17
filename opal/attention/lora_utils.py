@@ -252,13 +252,13 @@ def get_lora_parameters(model: nn.Module) -> List[torch.nn.Parameter]:
         model: The model with LoRA adapters injected
         
     Returns:
-        List[torch.nn.Parameter]: List of all LoRA parameters
+        List[torch.nn.Parameter]: List of all LoRA parameters that require gradients
     """
     lora_params = []
     
-    # LoRA Domain Adaptation: Collect all LoRA parameters
+    # LoRA Domain Adaptation: Collect all LoRA parameters that require gradients
     for name, param in model.named_parameters():
-        if 'lora_A' in name or 'lora_B' in name:
+        if ('lora_A' in name or 'lora_B' in name) and param.requires_grad:
             lora_params.append(param)
             
     return lora_params

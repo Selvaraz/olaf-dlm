@@ -729,27 +729,59 @@ class Opal:
                         scaler.unscale_(optimizer)
                         
                         # Calculate gradient norm for logging
-                        for p in model.parameters():
-                            if p.grad is not None:
-                                param_norm = p.grad.data.norm(2)
-                                total_norm += param_norm.item() ** 2
-                        total_norm = total_norm ** 0.5
-
-                        # Clip gradients
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                        if has_lora:
+                            # LoRA Domain Adaptation: Only use parameters in optimizer
+                            optimizer_params = []
+                            for group in optimizer.param_groups:
+                                optimizer_params.extend(group['params'])
+                            
+                            for p in optimizer_params:
+                                if p.grad is not None:
+                                    param_norm = p.grad.data.norm(2)
+                                    total_norm += param_norm.item() ** 2
+                            total_norm = total_norm ** 0.5
+                            
+                            # Clip gradients - only for parameters in optimizer
+                            torch.nn.utils.clip_grad_norm_(optimizer_params, max_norm=max_grad_norm)
+                        else:
+                            # Standard training: use all model parameters
+                            for p in model.parameters():
+                                if p.grad is not None:
+                                    param_norm = p.grad.data.norm(2)
+                                    total_norm += param_norm.item() ** 2
+                            total_norm = total_norm ** 0.5
+                            
+                            # Clip gradients
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                         scaler.step(optimizer)
                         scaler.update()
             
                     else:
                         # Calculate gradient norm for logging
-                        for p in model.parameters():
-                            if p.grad is not None:
-                                param_norm = p.grad.data.norm(2)
-                                total_norm += param_norm.item() ** 2
-                        total_norm = total_norm ** 0.5
-                        
-                        # Clip gradients and step optimizer
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                        if has_lora:
+                            # LoRA Domain Adaptation: Only use parameters in optimizer
+                            optimizer_params = []
+                            for group in optimizer.param_groups:
+                                optimizer_params.extend(group['params'])
+                                
+                            for p in optimizer_params:
+                                if p.grad is not None:
+                                    param_norm = p.grad.data.norm(2)
+                                    total_norm += param_norm.item() ** 2
+                            total_norm = total_norm ** 0.5
+                            
+                            # Clip gradients and step optimizer - only for parameters in optimizer
+                            torch.nn.utils.clip_grad_norm_(optimizer_params, max_norm=max_grad_norm)
+                        else:
+                            # Standard training: use all model parameters
+                            for p in model.parameters():
+                                if p.grad is not None:
+                                    param_norm = p.grad.data.norm(2)
+                                    total_norm += param_norm.item() ** 2
+                            total_norm = total_norm ** 0.5
+                            
+                            # Clip gradients and step optimizer
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                         optimizer.step()
 
                     # Zero gradients after weight update
@@ -2104,12 +2136,20 @@ class Opal:
             total_lora_params = sum(p.numel() for p in lora_params)
             print(f"🎯 LoRA Domain Adaptation: Total LoRA parameters: {total_lora_params:,}")
             
+            # LoRA Domain Adaptation: Validate all parameters require gradients
+            for i, param in enumerate(lora_params):
+                if not param.requires_grad:
+                    print(f"❌ LoRA Parameter {i} does not require gradients!")
+                    raise RuntimeError("LoRA Domain Adaptation: Found LoRA parameter that doesn't require gradients")
+            
             # LoRA Domain Adaptation: Create optimizer with only LoRA parameters
             adamw_kwargs = dict(betas=(0.9, 0.95), lr=lr, weight_decay=weight_decay, eps=1e-8)
             try:
                 optimizer = torch.optim.AdamW(lora_params, fused=True, **adamw_kwargs)
             except TypeError:
                 optimizer = torch.optim.AdamW(lora_params, **adamw_kwargs)
+                
+            print(f"🎯 LoRA Domain Adaptation: Optimizer created with {len(lora_params)} parameter groups")
                 
         elif self.is_finetune:
             # LoRA Domain Adaptation: Standard fine-tuning optimizer (when LoRA is not used)
