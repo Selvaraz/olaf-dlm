@@ -105,8 +105,8 @@ def test_lora_domain_adaptation(use_temp_dir: bool = True, verbose: bool = True)
         
         if verbose:
             print(f"   LoRA enabled: {lora_config.use_lora}")
-            print(f"   LoRA rank: {lora_config.rank}")
-            print(f"   LoRA alpha: {lora_config.alpha}")
+            print(f"   LoRA rank: {lora_config.lora_rank}")
+            print(f"   LoRA alpha: {lora_config.lora_alpha}")
             print(f"   Target modules: {lora_config.target_modules}")
             # LoRA Domain Adaptation: Debug configuration values
             print(f"   OPAL_MODEL_CONFIG use_lora: {OPAL_MODEL_CONFIG.get('use_lora')}")
