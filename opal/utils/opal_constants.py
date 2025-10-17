@@ -22,7 +22,7 @@ class OpalConstants:
     FINETUNE_TEST_DATA_PATH = f"{DATA_DIR}/unified_finetune_corpus.jsonl"
     # /workspace/dataset/pretokenized_unified_data/olaf_tokenizer_09062025_45M.pt
     #PRETOKENIZED_DATA_PATH = f"{DATA_DIR}/pretokenized_unified_data/olaf_tokenizer_09062025_45M.pt"
-    DATASET_FILE_NAME = "olaf_sentencepiece_unigram_45M_10112025"
+    DATASET_FILE_NAME = "olaf_sentencepiece_unigram_DAPT_45M_10112025"
     PRETOKENIZED_DATA_PATH = f"{DATA_DIR}/{DATASET_FILE_NAME}.pt"
     # PRETRAIN_DATA_PATH = f"{DATA_DIR}/consolidated_ascii_files"
     # /workspace/dataset/unified_data_corpus.txt

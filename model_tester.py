@@ -20,6 +20,13 @@ Usage:
     python3 finetune_model_tester.py --params "temp=0.8,top_k=50"      # Custom params
     python3 finetune_model_tester.py --guide                           # Guided examples
     python3 finetune_model_tester.py --validate                        # Validate setup
+    python3 finetune_model_tester.py --no-alternatives                 # Disable alternatives table
+    python3 finetune_model_tester.py --no-probabilities                # Disable probability display
+
+
+Ex:    
+python model_tester.py  --model-path ../../pretrain_checkpoints/checkpoint-latest.pt --tokenizer-path ../../tokenizer/olaf_sentencepiece_unigram_80MSaple_45M_10112025.model --device cpu --params "temperature=0.1,top_k=50,top_p=0.95,repetition_penalty=1.4,mask_eos_until=400,no_repeat_ngram_size=3,freq_alpha=0.25,presence_beta=0.15"   --prompt "mDNS is a protocol for " --temperature-sweep --no-alternatives
+
 """
 
 import sys
@@ -495,6 +502,7 @@ def generate_with_params(model, tokenizer, prompt, config, device, **gen_params)
     do_sample = gen_params.get('do_sample', True)
     show_probabilities = gen_params.get('show_probabilities', True)
     show_alternatives = gen_params.get('show_alternatives', True)
+    mask_eos_until = gen_params.get('mask_eos_until', 0)  # Mask EOS token until N tokens generated
     
     try:
         # Format prompt for fine-tuned model (add conversation markers)
@@ -518,6 +526,8 @@ def generate_with_params(model, tokenizer, prompt, config, device, **gen_params)
         
         print(f"🚀 Generating with: temp={temperature}, top_k={top_k}, top_p={top_p}")
         print(f"   Max tokens: {max_new_tokens}, Context: {context_length}")
+        if mask_eos_until > 0:
+            print(f"   🚫 EOS masking: Enabled until {mask_eos_until} tokens")
         print(f"   📝 Formatted prompt: '{formatted_prompt}'")
         print(f"   📏 Prompt tokens: {len(input_ids)}")
         
@@ -550,6 +560,14 @@ def generate_with_params(model, tokenizer, prompt, config, device, **gen_params)
                 
                 # Calculate original probabilities (before filtering) for true model confidence
                 original_probs = torch.softmax(next_token_logits, dim=-1)
+                
+                # Mask EOS token until minimum tokens are generated
+                if mask_eos_until > 0 and step < mask_eos_until:
+                    eos_id = tokenizer.eos_id()
+                    if eos_id is not None and eos_id < len(next_token_logits):
+                        next_token_logits[eos_id] = float('-inf')
+                        # Recalculate original probabilities after EOS masking
+                        original_probs = torch.softmax(next_token_logits, dim=-1)
                 
                 # Apply sampling filters
                 if do_sample:
@@ -719,14 +737,16 @@ def parse_generation_params(param_string):
                 'alternatives': 'show_alternatives',
                 'show_alternatives': 'show_alternatives',
                 'temp_sweep': 'enable_temp_sweep',
-                'enable_temp_sweep': 'enable_temp_sweep'
+                'enable_temp_sweep': 'enable_temp_sweep',
+                'mask_eos_until': 'mask_eos_until',
+                'mask_eos': 'mask_eos_until'
             }
             
             if key in param_map:
                 param_key = param_map[key]
                 
                 # Convert values to appropriate types
-                if param_key in ['top_k', 'max_new_tokens']:
+                if param_key in ['top_k', 'max_new_tokens', 'mask_eos_until']:
                     params[param_key] = int(value)
                 elif param_key in ['temperature', 'top_p', 'repetition_penalty']:
                     params[param_key] = float(value)
@@ -857,6 +877,7 @@ def interactive_mode(model, tokenizer, config, device):
     print("  probs on/off       - Toggle probability display")
     print("  alts on/off        - Toggle alternatives table display")
     print("  temp_sweep on/off  - Toggle temperature sweep analysis")
+    print("  eos_mask <N>       - Mask EOS token until N tokens generated")
     print("  help               - Show this help")
     print("  quit/exit          - Exit")
     print("=" * 50)
@@ -871,7 +892,8 @@ def interactive_mode(model, tokenizer, config, device):
         'do_sample': True,
         'show_probabilities': True,
         'show_alternatives': True,
-        'enable_temp_sweep': False
+        'enable_temp_sweep': False,
+        'mask_eos_until': 0
     }
     
     presets = print_generation_presets()
@@ -882,9 +904,27 @@ def interactive_mode(model, tokenizer, config, device):
             
             if not user_input or user_input.lower() in ['quit', 'exit']:
                 break
+            elif user_input.lower().startswith('eos_mask '):
+                try:
+                    mask_value = int(user_input[9:].strip())
+                    if mask_value >= 0:
+                        current_params['mask_eos_until'] = mask_value
+                        if mask_value == 0:
+                            print("✅ EOS masking disabled")
+                        else:
+                            print(f"✅ EOS token will be masked until {mask_value} tokens are generated")
+                    else:
+                        print("❌ EOS mask value must be non-negative")
+                except ValueError:
+                    print("❌ Invalid number. Use 'eos_mask <N>' where N is a non-negative integer")
+                continue
             elif user_input.lower() == 'help':
-                print("\nParameter format: temp=0.8,top_k=50,top_p=0.9,rep_penalty=1.1,max_tokens=256")
-                print("Available parameters: temp, top_k, top_p, rep_penalty, max_tokens, sample, show_probs, show_alts, temp_sweep")
+                print("\nParameter format: temp=0.8,top_k=50,top_p=0.9,rep_penalty=1.1,max_tokens=256,mask_eos_until=20")
+                print("Available parameters: temp, top_k, top_p, rep_penalty, max_tokens, sample, show_probs, show_alts, temp_sweep, mask_eos_until")
+                print("\nEOS Masking:")
+                print("  - mask_eos_until=N: Prevent model from generating EOS token until N tokens are generated")
+                print("  - Use 'eos_mask <N>' command to set this interactively")
+                print("  - Set to 0 to disable EOS masking")
                 continue
             elif user_input.lower() == 'presets':
                 print_generation_presets()
@@ -1187,7 +1227,7 @@ def guided_examples_mode():
         print("  - greedy: Most likely tokens (no sampling)")
         print()
         print("CUSTOM PARAMETERS:")
-        print("  Format: temp=0.8,top_k=50,top_p=0.9,rep_penalty=1.1,max_tokens=256,show_probs=true,show_alts=true,temp_sweep=true")
+        print("  Format: temp=0.8,top_k=50,top_p=0.9,rep_penalty=1.1,max_tokens=256,mask_eos_until=20")
         print("  - temp/temperature: Randomness (0.1-2.0)")
         print("  - top_k: Keep top K tokens (1-vocab_size)")
         print("  - top_p: Nucleus sampling threshold (0.1-1.0)")
@@ -1197,6 +1237,7 @@ def guided_examples_mode():
         print("  - show_probs: Show token probabilities (true/false)")
         print("  - show_alts: Show alternative tokens table (true/false)")
         print("  - temp_sweep: Show temperature sweep analysis (true/false)")
+        print("  - mask_eos_until: Mask EOS token until N tokens generated (0 to disable)")
 
 def main():
     parser = argparse.ArgumentParser(description="OPAL Fine-tuned Model Tester - Unified Script")
@@ -1219,6 +1260,10 @@ def main():
                        help="Validate setup and exit")
     parser.add_argument("--temperature-sweep", action="store_true",
                        help="Enable temperature sweep analysis")
+    parser.add_argument("--no-alternatives", action="store_true",
+                       help="Disable alternatives table display")
+    parser.add_argument("--no-probabilities", action="store_true",
+                       help="Disable probability display")
     
     args = parser.parse_args()
     
@@ -1286,7 +1331,8 @@ def main():
             'do_sample': True,
             'show_probabilities': True,
             'show_alternatives': True,
-            'enable_temp_sweep': False
+            'enable_temp_sweep': False,
+            'mask_eos_until': 0
         }
         
         # Apply preset if specified
@@ -1310,6 +1356,15 @@ def main():
         if args.temperature_sweep:
             gen_params['enable_temp_sweep'] = True
             print(f"✅ Temperature sweep enabled")
+        
+        # Apply display control flags
+        if args.no_alternatives:
+            gen_params['show_alternatives'] = False
+            print(f"✅ Alternatives table disabled")
+        
+        if args.no_probabilities:
+            gen_params['show_probabilities'] = False
+            print(f"✅ Probability display disabled")
         
         # Generate
         print(f"\n🚀 Generating for: '{args.prompt}'")

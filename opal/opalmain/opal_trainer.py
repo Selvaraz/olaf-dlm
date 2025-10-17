@@ -747,7 +747,7 @@ class Opal:
                     global_step += 1
                     
                     # Generate sample every 2500 iterations to monitor quality (AFTER increment)
-                    if global_step > 0 and global_step % 2500 == 0:
+                    if global_step > 0 and global_step % 1000 == 0:
                         print(f"\n🎯 === GENERATION SAMPLE AT STEP {global_step} ===")
                         
                         # LoRA Domain Adaptation: Phase-specific generation logic

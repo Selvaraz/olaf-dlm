@@ -173,8 +173,8 @@ _PHASE_CONFIGS = {
     "domain_adaptation": {
         **_GPT_CONFIG_OPAL_45M,
         "learning_rate": 1e-4,        # Lower LR for domain adaptation
-        "num_epoch": 3,               # More focused training on domain data
-        "early_stopping_patience": 4,
+        "num_epoch": 6,               # More focused training on domain data
+        "early_stopping_patience": 3,
         "weight_decay": 0.05,         # Reduced weight decay
         "gradient_accumulation_steps": 4,
         # LoRA Domain Adaptation: Core LoRA configuration for domain adaptation phase
@@ -183,7 +183,7 @@ _PHASE_CONFIGS = {
         "lora_alpha": 64,             # LoRA Domain Adaptation: LoRA scaling factor (alpha) - typically 2*rank
         "lora_dropout": 0.1,          # LoRA Domain Adaptation: Dropout for LoRA layers
         "target_modules": ["Wq", "Wk", "Wv", "out_proj"],  # LoRA Domain Adaptation: attention projections to inject LoRA
-        "lora_include_mlp": False,    # LoRA Domain Adaptation: Whether to include MLP layers in LoRA injection
+        "lora_include_mlp": True,    # LoRA Domain Adaptation: Whether to include MLP layers in LoRA injection
         # LoRA Domain Adaptation: Export and checkpointing configuration
         "export": {
             "merge_on_finalize": True,  # LoRA Domain Adaptation: Merge LoRA weights on training completion
@@ -231,7 +231,7 @@ _TRAINING_CONFIGS = {
     }
 }
 
-CURRENT_PHASE = "pretraining"
+CURRENT_PHASE = "domain_adaptation"
 OPAL_MODEL_CONFIG = _PHASE_CONFIGS[CURRENT_PHASE].copy()
 TRAINING_CONFIG = _TRAINING_CONFIGS[CURRENT_PHASE].copy()
 
