@@ -107,9 +107,67 @@ def load_model_and_tokenizer(checkpoint_path, tokenizer_path, device="auto"):
             print(f"🔧 Updating config vocab_size to match tokenizer")
             config['vocab_size'] = vocab_size
         
-        # Create and load model
+        # 🔧 CRITICAL FIX: Handle LoRA merged checkpoints properly
+        # If this is a merged checkpoint, disable LoRA to avoid double computation
+        is_merged_checkpoint = 'merged' in str(checkpoint_path) or checkpoint.get('is_merged', False)
+        
+        if is_merged_checkpoint:
+            print(f"🎯 Detected LoRA merged checkpoint - disabling LoRA injection for performance")
+            print(f"   Original config use_lora: {config.get('use_lora', False)}")
+            config = config.copy()  # Don't modify original config
+            config['use_lora'] = False
+            print(f"   Forced config use_lora: {config.get('use_lora', False)}")
+        
+        # Create model with optimized LoRA handling
+        print(f"🔧 Creating model with use_lora={config.get('use_lora', False)}")
         model = OpalGPT(config)
-        model.load_state_dict(model_state)
+        
+        # Handle LoRA checkpoint loading
+        has_lora_metadata = checkpoint.get('has_lora', False) if isinstance(checkpoint, dict) else False
+        config_has_lora = config.get('use_lora', False)
+        
+        print(f"🎯 LoRA Status: config={config_has_lora}, metadata={has_lora_metadata}, merged={is_merged_checkpoint}")
+        
+        # LoRA Generation Optimization: Track checkpoint type for debugging
+        # Note: Merged checkpoints have LoRA adapters baked into weights
+        # No need to store metadata - use proper LoRA detection methods
+        
+        # Load model state with proper error handling
+        try:
+            missing, unexpected = model.load_state_dict(model_state, strict=False)
+            
+            if missing or unexpected:
+                print(f"⚠️ State dict mismatch during loading:")
+                print(f"   Missing keys: {len(missing)} (first 3: {missing[:3] if missing else 'none'})")
+                print(f"   Unexpected keys: {len(unexpected)} (first 3: {unexpected[:3] if unexpected else 'none'})")
+                
+                # Check if this looks like a LoRA structure mismatch
+                lora_related_missing = [k for k in missing if 'lora' in k.lower() or 'base_linear' in k.lower()]
+                lora_related_unexpected = [k for k in unexpected if 'lora' in k.lower() or 'base_linear' in k.lower()]
+                
+                if lora_related_missing or lora_related_unexpected:
+                    print(f"🎯 LoRA structure mismatch detected!")
+                    print(f"   LoRA missing: {len(lora_related_missing)}")
+                    print(f"   LoRA unexpected: {len(lora_related_unexpected)}")
+                    
+                    # If we have LoRA structure issues, try loading with LoRA disabled
+                    if config_has_lora and (lora_related_missing or lora_related_unexpected):
+                        print(f"🔧 Attempting to load with LoRA disabled...")
+                        config_no_lora = config.copy()
+                        config_no_lora['use_lora'] = False
+                        
+                        # Recreate model without LoRA
+                        model = OpalGPT(config_no_lora)
+                        missing2, unexpected2 = model.load_state_dict(model_state, strict=False)
+                        print(f"✅ Retry results: missing={len(missing2)}, unexpected={len(unexpected2)}")
+            else:
+                print(f"✅ Model state loaded successfully with no mismatches")
+                
+        except Exception as load_error:
+            print(f"❌ Error loading model state: {load_error}")
+            print(f"🔧 This might be a LoRA checkpoint compatibility issue")
+            raise load_error
+        
         model.to(device)
         model.eval()
         
@@ -117,6 +175,22 @@ def load_model_and_tokenizer(checkpoint_path, tokenizer_path, device="auto"):
         print(f"   📊 Parameters: ~{sum(p.numel() for p in model.parameters())/1e6:.1f}M")
         print(f"   📐 Context length: {config.get('context_length', 'unknown')}")
         print(f"   🧮 Embedding dim: {config.get('emb_dim', 'unknown')}")
+        
+        # LoRA Generation Optimization: Print LoRA generation info
+        if hasattr(model, 'is_lora_enabled') and model.is_lora_enabled():
+            try:
+                lora_info = model.get_lora_info()
+                print(f"🎯 LoRA Status for Generation:")
+                print(f"   Active LoRA modules: {lora_info['total_lora_modules']}")
+                print(f"   LoRA parameters: {lora_info['total_lora_parameters']:,}")
+                print(f"   LoRA percentage: {lora_info['lora_percentage']:.2f}%")
+                print(f"   Generation mode: LoRA adapters active")
+            except Exception as e:
+                print(f"🎯 LoRA Status: Active (info unavailable: {e})")
+        elif is_merged_checkpoint:
+            print(f"🎯 LoRA Status: Merged checkpoint (adapters baked into weights)")
+        else:
+            print(f"🎯 LoRA Status: Standard model (no LoRA)")
         
         return model, tokenizer, config, device
         
@@ -493,7 +567,7 @@ def generate_with_params(model, tokenizer, prompt, config, device, **gen_params)
     Returns:
         tuple: (full_text, generated_text, metadata)
     """
-    # Default generation parameters
+    # Default generation parameters with performance optimizations
     max_new_tokens = gen_params.get('max_new_tokens', 512)
     temperature = gen_params.get('temperature', 1.0)
     top_k = gen_params.get('top_k', None)
@@ -503,6 +577,21 @@ def generate_with_params(model, tokenizer, prompt, config, device, **gen_params)
     show_probabilities = gen_params.get('show_probabilities', True)
     show_alternatives = gen_params.get('show_alternatives', True)
     mask_eos_until = gen_params.get('mask_eos_until', 0)  # Mask EOS token until N tokens generated
+    fast_mode = gen_params.get('fast_mode', False)  # 🚀 PERFORMANCE: Disable expensive tracking
+    
+    # 🚀 PERFORMANCE: Disable expensive features in fast mode
+    if fast_mode:
+        show_probabilities = False
+        show_alternatives = False
+        print(f"🚀 Fast mode enabled - disabling probability/alternatives tracking")
+    
+    # LoRA Generation Optimization: Detect LoRA status using proper model methods
+    is_lora_model = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
+    
+    if is_lora_model:
+        print(f"🎯 LoRA Generation: Using LoRA-enabled model (adapters active)")
+    else:
+        print(f"🎯 Standard Generation: Using model without active LoRA adapters")
     
     try:
         # Format prompt for fine-tuned model (add conversation markers)
@@ -531,8 +620,32 @@ def generate_with_params(model, tokenizer, prompt, config, device, **gen_params)
         print(f"   📝 Formatted prompt: '{formatted_prompt}'")
         print(f"   📏 Prompt tokens: {len(input_ids)}")
         
-        # Generation loop
+        # Generation loop with timeout protection
+        import signal
+        import time
+        
+        class TimeoutError(Exception):
+            pass
+        
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Generation timeout")
+        
+        # 🚀 PERFORMANCE: Optimize timeout mechanism for faster generation
+        generation_timeout = 10 if fast_mode else 30  # Shorter timeout in fast mode
+        total_timeout = max_new_tokens * (0.5 if fast_mode else 2)  # Much faster per token
+        
+        start_time = time.time()
+        
         for step in range(max_new_tokens):
+            step_start_time = time.time()
+            
+            # 🚀 PERFORMANCE: Check timeout less frequently in fast mode
+            if step % (20 if fast_mode else 5) == 0:
+                if time.time() - start_time > total_timeout:
+                    print(f"\n⏰ Generation stopped: Total timeout ({total_timeout}s) reached")
+                    metadata['stopped_reason'] = 'total_timeout'
+                    break
+            
             # Prepare input (keep within context window)
             if len(current_ids) >= context_length:
                 # Truncate from the beginning, keeping recent context
@@ -541,74 +654,172 @@ def generate_with_params(model, tokenizer, prompt, config, device, **gen_params)
             
             input_tensor = torch.tensor([current_ids], dtype=torch.long).to(device)
             
-            with torch.no_grad():
-                # Forward pass
-                output = model(input_tensor)
-                logits = output['logits'] if isinstance(output, dict) else output
-                next_token_logits = logits[0, -1, :].float()
+            try:
+                # 🚀 PERFORMANCE: Disable per-step timeout in fast mode
+                if not fast_mode:
+                    signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(generation_timeout)
                 
-                # Apply repetition penalty
-                if repetition_penalty != 1.0:
-                    # Simple repetition penalty: reduce prob of recently used tokens
-                    recent_tokens = set(current_ids[-50:])  # Last 50 tokens
-                    for token_id in recent_tokens:
-                        if token_id < len(next_token_logits):
-                            if next_token_logits[token_id] > 0:
-                                next_token_logits[token_id] /= repetition_penalty
-                            else:
-                                next_token_logits[token_id] *= repetition_penalty
-                
-                # Calculate original probabilities (before filtering) for true model confidence
-                original_probs = torch.softmax(next_token_logits, dim=-1)
-                
-                # Mask EOS token until minimum tokens are generated
-                if mask_eos_until > 0 and step < mask_eos_until:
-                    eos_id = tokenizer.eos_id()
-                    if eos_id is not None and eos_id < len(next_token_logits):
-                        next_token_logits[eos_id] = float('-inf')
-                        # Recalculate original probabilities after EOS masking
+                with torch.no_grad():
+                    # 🚀 PERFORMANCE: Time the forward pass to identify bottlenecks
+                    if fast_mode and step % 20 == 0:
+                        forward_start = time.time()
+                    
+                    # LoRA Generation Optimization: Model forward pass (LoRA handled automatically)
+                    # For LoRA models: adapters applied during forward pass
+                    # For merged LoRA: adapters already baked into weights
+                    output = model(input_tensor)
+                    logits = output['logits'] if isinstance(output, dict) else output
+                    next_token_logits = logits[0, -1, :].float()
+                    
+                    # 🚀 PERFORMANCE: Report forward pass timing
+                    if fast_mode and step % 20 == 0:
+                        forward_time = time.time() - forward_start
+                        print(f"   Forward pass: {forward_time:.3f}s")
+                    
+                    # Clear timeout
+                    if not fast_mode:
+                        signal.alarm(0)
+                    
+                    # 🚀 ULTRA-FAST MODE: Skip repetition penalty in fast mode for speed
+                    if repetition_penalty != 1.0 and not fast_mode:
+                        # Simple repetition penalty: reduce prob of recently used tokens
+                        recent_tokens = set(current_ids[-50:])  # Last 50 tokens
+                        for token_id in recent_tokens:
+                            if token_id < len(next_token_logits):
+                                if next_token_logits[token_id] > 0:
+                                    next_token_logits[token_id] /= repetition_penalty
+                                else:
+                                    next_token_logits[token_id] *= repetition_penalty
+                    
+                    # 🚀 PERFORMANCE: Skip expensive probability calculations in fast mode
+                    if not fast_mode:
+                        # Calculate original probabilities (before filtering) for true model confidence
                         original_probs = torch.softmax(next_token_logits, dim=-1)
-                
-                # Apply sampling filters
-                if do_sample:
-                    filtered_logits = nucleus_sampling(
-                        next_token_logits.clone(), 
-                        top_k=top_k, 
-                        top_p=top_p, 
-                        temperature=temperature
-                    )
-                    filtered_probs = torch.softmax(filtered_logits, dim=-1)
-                    next_token = torch.multinomial(filtered_probs, 1).item()
-                    # Get the TRUE probability of the selected token (from original distribution)
-                    token_prob = original_probs[next_token].item()
-                else:
-                    # Greedy decoding
-                    next_token = torch.argmax(next_token_logits).item()
-                    # Get the probability of the selected token
-                    token_prob = original_probs[next_token].item()
-                
-                # Get top-6 alternatives from ORIGINAL probabilities (shows true model confidence)
-                top_probs, top_indices = torch.topk(original_probs, min(6, original_probs.size(-1)))
-                alternatives = []
-                for i, (prob, idx) in enumerate(zip(top_probs, top_indices)):
-                    token_text = tokenizer.decode([idx.item()])
-                    alternatives.append((token_text, prob.item(), idx.item() == next_token))
-                
-                current_ids.append(next_token)
-                metadata['generated_length'] += 1
-                
-                # Store token and its probability for display
-                token_text = tokenizer.decode([next_token])
-                metadata['token_probabilities'].append((token_text, token_prob))
-                metadata['token_alternatives'].append(alternatives)
-                
-                # Check stopping conditions
-                if next_token == tokenizer.eos_id():
-                    metadata['stopped_reason'] = 'eos_token'
-                    break
-                elif next_token == tokenizer.pad_id():
-                    metadata['stopped_reason'] = 'pad_token'
-                    break
+                        
+                        # Check for NaN or infinite values
+                        if torch.isnan(original_probs).any() or torch.isinf(original_probs).any():
+                            print(f"\n⚠️ NaN/Inf detected in probabilities at step {step}")
+                            metadata['stopped_reason'] = 'numerical_instability'
+                            break
+                    
+                    # 🚀 ULTRA-FAST MODE: Skip EOS masking in fast mode if no specific requirement
+                    if mask_eos_until > 0 and step < mask_eos_until and not fast_mode:
+                        eos_id = tokenizer.eos_id()
+                        if eos_id is not None and eos_id < len(next_token_logits):
+                            next_token_logits[eos_id] = float('-inf')
+                            # Recalculate original probabilities after EOS masking
+                            if not fast_mode:
+                                original_probs = torch.softmax(next_token_logits, dim=-1)
+                    elif mask_eos_until > 0 and step < mask_eos_until and fast_mode:
+                        # Fast mode: Just mask EOS without recalculating probabilities
+                        eos_id = tokenizer.eos_id()
+                        if eos_id is not None and eos_id < len(next_token_logits):
+                            next_token_logits[eos_id] = float('-inf')
+                    
+                    # 🚀 ULTRA-FAST MODE: Simplest possible sampling in fast mode
+                    if fast_mode:
+                        # Skip complex sampling, just use temperature + top_k
+                        if temperature > 0 and do_sample:
+                            logits_temp = next_token_logits / temperature
+                            if top_k and top_k > 0:
+                                # Simple top-k: zero out everything below top-k
+                                top_k_vals, top_k_indices = torch.topk(logits_temp, min(top_k, logits_temp.size(-1)))
+                                logits_temp[logits_temp < top_k_vals[-1]] = float('-inf')
+                            probs = torch.softmax(logits_temp, dim=-1)
+                            next_token = torch.multinomial(probs, 1).item()
+                        else:
+                            # Greedy
+                            next_token = torch.argmax(next_token_logits).item()
+                    else:
+                        # Standard complex sampling
+                        if do_sample:
+                            filtered_logits = nucleus_sampling(
+                                next_token_logits.clone(), 
+                                top_k=top_k, 
+                                top_p=top_p, 
+                                temperature=temperature
+                            )
+                            filtered_probs = torch.softmax(filtered_logits, dim=-1)
+                            
+                            # Check for all-zero probabilities (can cause infinite loop)
+                            if filtered_probs.sum() == 0:
+                                print(f"\n⚠️ All probabilities filtered out at step {step}")
+                                # Use greedy decoding as fallback
+                                next_token = torch.argmax(next_token_logits).item()
+                            else:
+                                next_token = torch.multinomial(filtered_probs, 1).item()
+                            
+                            # 🚀 PERFORMANCE: Get token probability only if needed
+                            if not fast_mode:
+                                token_prob = original_probs[next_token].item()
+                        else:
+                            # Greedy decoding
+                            next_token = torch.argmax(next_token_logits).item()
+                            # 🚀 PERFORMANCE: Get probability only if needed
+                            if not fast_mode:
+                                token_prob = original_probs[next_token].item()
+                    
+                    # 🚀 PERFORMANCE: Skip expensive alternative tracking in fast mode
+                    if show_alternatives and not fast_mode:
+                        # Get top-6 alternatives from ORIGINAL probabilities (shows true model confidence)
+                        top_probs, top_indices = torch.topk(original_probs, min(6, original_probs.size(-1)))
+                        alternatives = []
+                        for i, (prob, idx) in enumerate(zip(top_probs, top_indices)):
+                            token_text = tokenizer.decode([idx.item()])
+                            alternatives.append((token_text, prob.item(), idx.item() == next_token))
+                        metadata['token_alternatives'].append(alternatives)
+                    
+                    current_ids.append(next_token)
+                    metadata['generated_length'] += 1
+                    
+                    # 🚀 PERFORMANCE: Store token info only if needed
+                    if show_probabilities and not fast_mode:
+                        token_text = tokenizer.decode([next_token])
+                        metadata['token_probabilities'].append((token_text, token_prob))
+                    
+                    # 🚀 FAST MODE: Show streaming output so user can see progress
+                    if fast_mode:
+                        # Show token immediately for real-time feedback
+                        new_token_text = tokenizer.decode([next_token])
+                        print(new_token_text, end='', flush=True)
+                        
+                        # Show progress summary every 25 tokens
+                        if step % 25 == 0 and step > 0:
+                            elapsed = time.time() - start_time
+                            rate = step / elapsed
+                            print(f"\n   [{step} tokens, {elapsed:.1f}s, {rate:.1f} tok/s]", end='', flush=True)
+                    elif step % 10 == 0:  # Standard mode: less frequent updates
+                        current_text = tokenizer.decode(current_ids[len(input_ids):])
+                        print(f"\n🔄 Generated so far: {current_text[:100]}{'...' if len(current_text) > 100 else ''}")
+                    
+                    # Check stopping conditions
+                    if next_token == tokenizer.eos_id():
+                        metadata['stopped_reason'] = 'eos_token'
+                        break
+                    elif next_token == tokenizer.pad_id():
+                        metadata['stopped_reason'] = 'pad_token'
+                        break
+                    
+                    # 🚀 PERFORMANCE: Less frequent progress updates in fast mode
+                    progress_freq = 100 if fast_mode else 50
+                    if step > 0 and step % progress_freq == 0:
+                        elapsed = time.time() - start_time
+                        print(f"   Generated {step} tokens in {elapsed:.1f}s...")
+                        
+            except TimeoutError:
+                print(f"\n⏰ Generation stopped: Step timeout ({generation_timeout}s) at step {step}")
+                metadata['stopped_reason'] = 'step_timeout'
+                break
+            except Exception as gen_error:
+                print(f"\n❌ Generation error at step {step}: {gen_error}")
+                metadata['stopped_reason'] = 'generation_error'
+                metadata['error'] = str(gen_error)
+                break
+            finally:
+                # 🚀 PERFORMANCE: Always clear the alarm (only if not in fast mode)
+                if not fast_mode:
+                    signal.alarm(0)
         
         # Decode results
         full_text = tokenizer.decode(current_ids)
@@ -739,7 +950,9 @@ def parse_generation_params(param_string):
                 'temp_sweep': 'enable_temp_sweep',
                 'enable_temp_sweep': 'enable_temp_sweep',
                 'mask_eos_until': 'mask_eos_until',
-                'mask_eos': 'mask_eos_until'
+                'mask_eos': 'mask_eos_until',
+                'fast': 'fast_mode',
+                'fast_mode': 'fast_mode'
             }
             
             if key in param_map:
@@ -757,6 +970,8 @@ def parse_generation_params(param_string):
                 elif param_key == 'show_alternatives':
                     params[param_key] = value.lower() in ('true', '1', 'yes')
                 elif param_key == 'enable_temp_sweep':
+                    params[param_key] = value.lower() in ('true', '1', 'yes')
+                elif param_key == 'fast_mode':
                     params[param_key] = value.lower() in ('true', '1', 'yes')
                 else:
                     params[param_key] = value
@@ -832,9 +1047,24 @@ def validate_setup():
                 model_state = checkpoint
                 print(f"⚠️ Legacy checkpoint format")
             
-            # Create model
+            # Create model with LoRA handling
             model = OpalGPT(config)
-            model.load_state_dict(model_state)
+            missing, unexpected = model.load_state_dict(model_state, strict=False)
+            
+            # Check for LoRA-related loading issues
+            if missing or unexpected:
+                print(f"⚠️ State dict loading issues:")
+                print(f"   Missing keys: {len(missing)} (sample: {missing[:2] if missing else 'none'})")
+                print(f"   Unexpected keys: {len(unexpected)} (sample: {unexpected[:2] if unexpected else 'none'})")
+                
+                # Check if this is LoRA-related
+                lora_issues = any('lora' in k.lower() or 'base_linear' in k.lower() 
+                                for k in (missing + unexpected))
+                if lora_issues:
+                    print(f"🎯 LoRA-related structure detected in checkpoint")
+            else:
+                print(f"✅ Model state loaded successfully")
+            
             model.eval()
             
             param_count = sum(p.numel() for p in model.parameters())
@@ -877,6 +1107,7 @@ def interactive_mode(model, tokenizer, config, device):
     print("  probs on/off       - Toggle probability display")
     print("  alts on/off        - Toggle alternatives table display")
     print("  temp_sweep on/off  - Toggle temperature sweep analysis")
+    print("  fast on/off        - Toggle fast mode (disables tracking for speed)")
     print("  eos_mask <N>       - Mask EOS token until N tokens generated")
     print("  help               - Show this help")
     print("  quit/exit          - Exit")
@@ -893,7 +1124,8 @@ def interactive_mode(model, tokenizer, config, device):
         'show_probabilities': True,
         'show_alternatives': True,
         'enable_temp_sweep': False,
-        'mask_eos_until': 0
+        'mask_eos_until': 0,
+        'fast_mode': False
     }
     
     presets = print_generation_presets()
@@ -920,7 +1152,7 @@ def interactive_mode(model, tokenizer, config, device):
                 continue
             elif user_input.lower() == 'help':
                 print("\nParameter format: temp=0.8,top_k=50,top_p=0.9,rep_penalty=1.1,max_tokens=256,mask_eos_until=20")
-                print("Available parameters: temp, top_k, top_p, rep_penalty, max_tokens, sample, show_probs, show_alts, temp_sweep, mask_eos_until")
+                print("Available parameters: temp, top_k, top_p, rep_penalty, max_tokens, sample, show_probs, show_alts, temp_sweep, fast, mask_eos_until")
                 print("\nEOS Masking:")
                 print("  - mask_eos_until=N: Prevent model from generating EOS token until N tokens are generated")
                 print("  - Use 'eos_mask <N>' command to set this interactively")
@@ -966,6 +1198,17 @@ def interactive_mode(model, tokenizer, config, device):
                     print("✅ Temperature sweep analysis disabled")
                 else:
                     print("❌ Use 'temp_sweep on' or 'temp_sweep off'")
+                continue
+            elif user_input.lower().startswith('fast '):
+                toggle = user_input[5:].strip().lower()
+                if toggle in ['on', 'true', '1', 'yes']:
+                    current_params['fast_mode'] = True
+                    print("🚀 Fast mode enabled - disabling expensive tracking for performance")
+                elif toggle in ['off', 'false', '0', 'no']:
+                    current_params['fast_mode'] = False
+                    print("✅ Fast mode disabled - full tracking enabled")
+                else:
+                    print("❌ Use 'fast on' or 'fast off'")
                 continue
             elif user_input.lower().startswith('preset '):
                 preset_name = user_input[7:].strip()
@@ -1264,6 +1507,8 @@ def main():
                        help="Disable alternatives table display")
     parser.add_argument("--no-probabilities", action="store_true",
                        help="Disable probability display")
+    parser.add_argument("--fast", action="store_true",
+                       help="Enable fast mode (disables expensive tracking for better performance)")
     
     args = parser.parse_args()
     
@@ -1365,6 +1610,11 @@ def main():
         if args.no_probabilities:
             gen_params['show_probabilities'] = False
             print(f"✅ Probability display disabled")
+        
+        # Apply fast mode if flag is provided
+        if args.fast:
+            gen_params['fast_mode'] = True
+            print(f"🚀 Fast mode enabled - optimized for performance")
         
         # Generate
         print(f"\n🚀 Generating for: '{args.prompt}'")

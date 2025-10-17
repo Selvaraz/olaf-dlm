@@ -411,11 +411,27 @@ class Opal:
         Decoding with top-k / top-p, temperature, improved repetition penalty,
         plus no-repeat n-gram, presence/frequency penalties, and max-consecutive guard.
         Uses scatter()/masked_fill() for top-p to avoid CUDA indexing asserts.
+        
+        LoRA Domain Adaptation: This method works seamlessly with LoRA models.
+        LoRA adapters are automatically applied during the forward pass without
+        requiring special handling in the generation logic.
         """
+        # LoRA Domain Adaptation: Ensure model is in evaluation mode
         model.eval()
         device = idx.device
         B = idx.size(0)
         assert B >= 1
+        
+        # LoRA Domain Adaptation: Optional LoRA status logging for debugging
+        if hasattr(model, 'is_lora_enabled') and model.is_lora_enabled():
+            # Only log once per generation to avoid spam
+            if not hasattr(self, '_lora_gen_logged'):
+                self._lora_gen_logged = True
+                try:
+                    lora_info = model.get_lora_info()
+                    print(f"🎯 LoRA Generation: {lora_info['total_lora_modules']} modules active")
+                except:
+                    print(f"🎯 LoRA Generation: LoRA adapters active")
 
         def _apply_no_repeat_ngram_block(logits_row: torch.Tensor, seq_row: torch.Tensor, n: int):
             """In-place: set logits of tokens that would create a repeated n-gram to -inf (B=1 fast path; loops are fine)."""
@@ -1090,13 +1106,28 @@ class Opal:
 
 
     def generate_with_topk(self, model, tokenizer, device, start_context, top_k):
+        # LoRA Domain Adaptation: Ensure proper model state for generation
         model.eval()
+        
+        # LoRA Domain Adaptation: Check and log LoRA status for debugging
+        is_lora_enabled = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
+        if is_lora_enabled:
+            print(f"🎯 LoRA Generation: Using LoRA-enabled model")
+            # LoRA Domain Adaptation: Ensure LoRA adapters are in correct state
+            try:
+                lora_info = model.get_lora_info()
+                print(f"   LoRA modules: {lora_info['total_lora_modules']}, params: {lora_info['total_lora_parameters']:,}")
+            except Exception as e:
+                print(f"   ⚠️ Could not get LoRA info: {e}")
+        
         context_size = model.positional_embeddings.weight.shape[0]
         encoded = self.text_to_token_ids(start_context).to(device)
+        
         with torch.no_grad():
+            # LoRA Domain Adaptation: Use passed top_k parameter instead of hardcoded value
             token_ids = self.generate(model=model, idx=encoded, 
                                       context_size=context_size, 
-                                      top_k=40,  # Reduced top_k for less randomness
+                                      top_k=top_k,  # LoRA Domain Adaptation: Use dynamic top_k
                                       top_p=0.85,  # Reduced nucleus sampling for more focus
                                       temperature=0.7,  # Lower temperature for less randomness
                                       max_new_tokens=30,  # Shorter outputs to prevent repetition
@@ -1106,6 +1137,8 @@ class Opal:
             print("==========================================")
             print(decoded_text.replace("\n", " "))  # Compact print format
             print("==========================================")
+        
+        # LoRA Domain Adaptation: Ensure model returns to training state
         model.train()
 
     def generate_for_finetune(self, model, tokenizer, device, start_context):
@@ -1113,24 +1146,46 @@ class Opal:
         Specialized generation method for fine-tuning with more conservative settings
         to avoid repetitive outputs.
         """
+        # LoRA Domain Adaptation: Ensure proper model state for generation
         model.eval()
+        
+        # LoRA Domain Adaptation: Check LoRA status for fine-tuning
+        is_lora_enabled = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
+        if is_lora_enabled:
+            print("🎯 LoRA Fine-tuning Generation: Using LoRA-enabled model")
+        
         context_size = model.positional_embeddings.weight.shape[0]
         encoded = self.text_to_token_ids(start_context).to(device)
+        
         with torch.no_grad():
+            # LoRA Domain Adaptation: Adjust parameters for LoRA fine-tuning
+            if is_lora_enabled:
+                # LoRA fine-tuning: More conservative settings for stability
+                top_k = 25
+                temperature = 0.6
+                repetition_penalty = 3.5
+            else:
+                # Traditional fine-tuning settings
+                top_k = 30
+                temperature = 0.8
+                repetition_penalty = 3.0
+                
             token_ids = self.generate(model=model, idx=encoded, 
                                       context_size=context_size, 
-                                      top_k=30,  # More focused top-k
+                                      top_k=top_k,  # LoRA Domain Adaptation: Dynamic based on LoRA status
                                       top_p=0.85,  # Slightly more conservative nucleus sampling
-                                      temperature=0.8,  # Lower temperature for more deterministic output
+                                      temperature=temperature,  # LoRA Domain Adaptation: Dynamic temperature
                                       max_new_tokens=40,  # Slightly fewer tokens
                                       eos_id=tokenizer.eos_id(),
-                                      repetition_penalty=3.0)  # Strong repetition penalty
+                                      repetition_penalty=repetition_penalty)  # LoRA Domain Adaptation: Dynamic penalty
             decoded_text = self.token_ids_to_text(token_ids)
             print("\n")
             print("========== FINE-TUNE GENERATION ==========")
             print(decoded_text.replace("\n", " "))  # Compact print format
             print("===========================================")
             print("\n")
+        
+        # LoRA Domain Adaptation: Ensure model returns to training state
         model.train()
 
     def analyze_finetune_data_quality(self, jsonl_file, sample_size=5):
@@ -1454,6 +1509,17 @@ class Opal:
         if has_lora:
             print("🎯 LoRA Domain Adaptation: Saving LoRA checkpoints...")
             
+            # LoRA Domain Adaptation: Validate LoRA configuration and model state
+            if not hasattr(model, 'lora_config'):
+                print("❌ LoRA Domain Adaptation: Model missing lora_config attribute!")
+                print("❌ This indicates the model was not properly initialized with LoRA adapters")
+                raise RuntimeError("LoRA Domain Adaptation: Model missing required lora_config attribute")
+            
+            if not hasattr(model, 'is_lora_enabled') or not model.is_lora_enabled():
+                print("❌ LoRA Domain Adaptation: Model does not have LoRA enabled!")
+                print("❌ This indicates LoRA injection failed or was not performed")
+                raise RuntimeError("LoRA Domain Adaptation: Model LoRA injection verification failed")
+            
             # LoRA Domain Adaptation: Create subdirectories for different checkpoint types
             base_dir = os.path.join(checkpoint_dir, "base")
             lora_dir = os.path.join(checkpoint_dir, "lora") 
@@ -1469,6 +1535,8 @@ class Opal:
             
             # LoRA Domain Adaptation: Get LoRA configuration and base model info
             lora_config = model.lora_config
+            print(f"🎯 LoRA Configuration: {lora_config.to_dict()}")
+            
             base_model_info = {
                 "checkpoint_path": base_checkpoint_path,
                 "timestamp": timestamp,
@@ -1477,6 +1545,13 @@ class Opal:
                 "emb_dim": config.get("emb_dim", 512),
                 "n_layers": config.get("n_layers", 12),
             }
+            
+            # LoRA Domain Adaptation: Get LoRA statistics for logging
+            lora_info = model.get_lora_info()
+            print(f"🎯 LoRA Model Info:")
+            print(f"   Total LoRA modules: {lora_info['total_lora_modules']}")
+            print(f"   Total LoRA parameters: {lora_info['total_lora_parameters']:,}")
+            print(f"   LoRA percentage: {lora_info['lora_percentage']:.2f}%")
             
             # LoRA Domain Adaptation: Save LoRA adapter weights
             from ..attention.lora_utils import save_lora_adapters
@@ -1489,25 +1564,34 @@ class Opal:
                 format=lora_config.checkpoint_format
             )
             print(f"🎯 LoRA Domain Adaptation: Saved LoRA adapters: {adapter_path}")
+            print(f"🎯 LoRA Manifest Info: {lora_manifest['total_adapters']} adapters, {lora_manifest['total_parameters']:,} parameters")
             
             # LoRA Domain Adaptation: Create and save merged model if configured
             if lora_config.merge_on_finalize:
                 print("🎯 LoRA Domain Adaptation: Creating merged model checkpoint...")
                 
-                # LoRA Domain Adaptation: Create a copy of the model for merging
-                import copy
-                merged_model = copy.deepcopy(model)
-                merged_model = merged_model.merge_lora_weights(verbose=True)
-                
-                # LoRA Domain Adaptation: Save merged checkpoint
-                merged_checkpoint = checkpoint.copy()
-                merged_checkpoint["model_state_dict"] = merged_model.state_dict()
-                merged_checkpoint["merged_from_lora"] = True
-                merged_checkpoint["lora_config"] = lora_config.to_dict()
-                
-                merged_checkpoint_path = os.path.join(merged_dir, f"opal_gpt_merged_{timestamp}.pt")
-                torch.save(merged_checkpoint, merged_checkpoint_path)
-                print(f"🎯 LoRA Domain Adaptation: Saved merged checkpoint: {merged_checkpoint_path}")
+                # LoRA Domain Adaptation: Use the proper merging utility function
+                from ..attention.lora_utils import merge_lora_weights
+                try:
+                    # Create merged model without expensive deep copy
+                    print("🎯 LoRA Domain Adaptation: Merging LoRA adapters into base weights...")
+                    merged_model = merge_lora_weights(model, verbose=True)
+                    
+                    # LoRA Domain Adaptation: Save merged checkpoint
+                    merged_checkpoint = checkpoint.copy()
+                    merged_checkpoint["model_state_dict"] = merged_model.state_dict()
+                    merged_checkpoint["merged_from_lora"] = True
+                    merged_checkpoint["lora_config"] = lora_config.to_dict()
+                    
+                    merged_checkpoint_path = os.path.join(merged_dir, f"opal_gpt_merged_{timestamp}.pt")
+                    torch.save(merged_checkpoint, merged_checkpoint_path)
+                    print(f"🎯 LoRA Domain Adaptation: Saved merged checkpoint: {merged_checkpoint_path}")
+                    
+                except Exception as merge_error:
+                    print(f"❌ LoRA Domain Adaptation: Failed to create merged checkpoint: {merge_error}")
+                    print(f"⚠️ LoRA Domain Adaptation: Continuing with base and adapter checkpoints only")
+            else:
+                print("🎯 LoRA Domain Adaptation: Skipping merged checkpoint (merge_on_finalize=False)")
             
             # LoRA Domain Adaptation: Update main checkpoint path to point to base
             checkpoint_path = base_checkpoint_path
@@ -1538,11 +1622,24 @@ class Opal:
                 os.remove(symlink_path)
             elif os.path.isdir(symlink_path):
                 shutil.rmtree(symlink_path)
-        os.symlink(checkpoint_path, symlink_path)
+        
+        # LoRA Domain Adaptation: For LoRA models, link to the checkpoint directory
+        # For standard models, link to the checkpoint file
+        if has_lora:
+            os.symlink(checkpoint_dir, symlink_path)
+            print(f"🎯 LoRA Domain Adaptation: Symlink created: {symlink_path} -> {checkpoint_dir}")
+        else:
+            os.symlink(checkpoint_path, symlink_path)
+            print(f"✅ Standard checkpoint symlink created: {symlink_path} -> {checkpoint_path}")
 
         # LoRA Domain Adaptation: Return checkpoint directory path for LoRA models
         if has_lora:
             print(f"🎯 LoRA Domain Adaptation: All checkpoints saved in: {checkpoint_dir}")
+            print(f"🎯 LoRA Domain Adaptation: Structure:")
+            print(f"   📁 {checkpoint_dir}/")
+            print(f"     📁 base/     - Base model with LoRA structure")
+            print(f"     📁 lora/     - LoRA adapter weights only") 
+            print(f"     📁 merged/   - Merged unified model (if enabled)")
             return checkpoint_dir  # LoRA Domain Adaptation: Return directory containing all checkpoint types
         else:
             return checkpoint_path  # LoRA Domain Adaptation: Return single file path for non-LoRA models
@@ -1982,12 +2079,25 @@ class Opal:
         config_has_lora = config.get('use_lora', False)
         model_has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
         has_lora = config_has_lora or model_has_lora
+        
+        # LoRA Domain Adaptation: Enhanced debugging and validation
+        print(f"🎯 LoRA Detection Debug:")
+        print(f"   Config use_lora: {config_has_lora}")
+        print(f"   Model has is_lora_enabled: {hasattr(model, 'is_lora_enabled')}")
+        if hasattr(model, 'is_lora_enabled'):
+            print(f"   Model LoRA enabled: {model.is_lora_enabled()}")
+        print(f"   Model has lora_config: {hasattr(model, 'lora_config')}")
+        print(f"   Final LoRA decision: {has_lora}")
+        
         if has_lora:
             print("🎯 LoRA Domain Adaptation: Creating optimizer for LoRA parameters only")
             
             # LoRA Domain Adaptation: Get only LoRA parameters for training
             lora_params = model.get_lora_parameters()
             if not lora_params:
+                print("❌ LoRA Domain Adaptation: No LoRA parameters found!")
+                print("❌ This indicates LoRA injection failed or model was not properly initialized")
+                print("❌ Available model methods:", [m for m in dir(model) if 'lora' in m.lower()])
                 raise RuntimeError("LoRA Domain Adaptation: No LoRA parameters found for training")
                 
             print(f"🎯 LoRA Domain Adaptation: Found {len(lora_params)} LoRA parameter groups")
@@ -2233,5 +2343,22 @@ class Opal:
         )
         # Save final checkpoint
         print("✅ Saving final checkpoint")
+        
+        # Get tokenizer model path from various sources
+        tokenizer_model_path = None
+        if hasattr(tokenizer, 'model_file') and tokenizer.model_file:
+            tokenizer_model_path = tokenizer.model_file
+        elif hasattr(tokenizer, 'model_path') and tokenizer.model_path:
+            tokenizer_model_path = tokenizer.model_path
+        elif hasattr(self.tokenizer, 'model_file') and self.tokenizer.model_file:
+            tokenizer_model_path = self.tokenizer.model_file
+        
+        # Save the final checkpoint with proper scheduler reference
+        final_checkpoint_path = self.save_model_checkpoint(
+            self.config, model, optimizer, cosine_scheduler, num_epochs, 
+            train_losses, val_losses, tokenizer_model_path
+        )
+        print(f"✅ Final checkpoint saved: {final_checkpoint_path}")
+        
         # FINETUNE_PH2: Return training results with correct variable name
         return train_losses, val_losses, track_tokens_seen
