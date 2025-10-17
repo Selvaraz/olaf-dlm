@@ -780,43 +780,68 @@ class Opal:
                 if is_accumulation_step or is_last_batch:
                     total_norm = 0.0  # For gradient norm calculation
                     
-                    if use_mixed_precision and scaler_used_this_cycle:
-                        # Unscale gradients before clipping
-                        scaler.unscale_(optimizer)
-                        
-                        # Calculate gradient norm for logging
-                        if has_lora:
-                            # LoRA Domain Adaptation: Only use parameters in optimizer
-                            optimizer_params = []
-                            for group in optimizer.param_groups:
-                                optimizer_params.extend(group['params'])
+                    if use_mixed_precision:
+                        # Only proceed with scaler operations if we actually used it
+                        if scaler_used_this_cycle:
+                            # Unscale gradients before clipping
+                            scaler.unscale_(optimizer)
                             
-                            for p in optimizer_params:
-                                if p.grad is not None:
-                                    param_norm = p.grad.data.norm(2)
-                                    total_norm += param_norm.item() ** 2
-                            total_norm = total_norm ** 0.5
+                            # Calculate gradient norm for logging
+                            if has_lora:
+                                # LoRA Domain Adaptation: Only use parameters in optimizer
+                                optimizer_params = []
+                                for group in optimizer.param_groups:
+                                    optimizer_params.extend(group['params'])
+                                
+                                for p in optimizer_params:
+                                    if p.grad is not None:
+                                        param_norm = p.grad.data.norm(2)
+                                        total_norm += param_norm.item() ** 2
+                                total_norm = total_norm ** 0.5
+                                
+                                # Clip gradients - only for parameters in optimizer
+                                torch.nn.utils.clip_grad_norm_(optimizer_params, max_norm=max_grad_norm)
+                            else:
+                                # Standard training: use all model parameters
+                                for p in model.parameters():
+                                    if p.grad is not None:
+                                        param_norm = p.grad.data.norm(2)
+                                        total_norm += param_norm.item() ** 2
+                                total_norm = total_norm ** 0.5
+                                
+                                # Clip gradients
+                                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                             
-                            # Clip gradients - only for parameters in optimizer
-                            torch.nn.utils.clip_grad_norm_(optimizer_params, max_norm=max_grad_norm)
+                            # Step and update only if we have accumulated gradients with scaler
+                            scaler.step(optimizer)
+                            scaler.update()
                         else:
-                            # Standard training: use all model parameters
-                            for p in model.parameters():
-                                if p.grad is not None:
-                                    param_norm = p.grad.data.norm(2)
-                                    total_norm += param_norm.item() ** 2
-                            total_norm = total_norm ** 0.5
-                            
-                            # Clip gradients
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                            # No scaling was done, just step normally
+                            if has_lora:
+                                optimizer_params = []
+                                for group in optimizer.param_groups:
+                                    optimizer_params.extend(group['params'])
+                                
+                                for p in optimizer_params:
+                                    if p.grad is not None:
+                                        param_norm = p.grad.data.norm(2)
+                                        total_norm += param_norm.item() ** 2
+                                total_norm = total_norm ** 0.5
+                                torch.nn.utils.clip_grad_norm_(optimizer_params, max_norm=max_grad_norm)
+                            else:
+                                for p in model.parameters():
+                                    if p.grad is not None:
+                                        param_norm = p.grad.data.norm(2)
+                                        total_norm += param_norm.item() ** 2
+                                total_norm = total_norm ** 0.5
+                                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                            optimizer.step()
                         
-                        # Only step and update if we have accumulated gradients
-                        scaler.step(optimizer)
-                        scaler.update()
-                        scaler_used_this_cycle = False  # Reset for next accumulation cycle
+                        # Reset scaler tracking for next accumulation cycle
+                        scaler_used_this_cycle = False
             
                     else:
-                        # Calculate gradient norm for logging
+                        # Non-mixed precision training
                         if has_lora:
                             # LoRA Domain Adaptation: Only use parameters in optimizer
                             optimizer_params = []
@@ -845,7 +870,6 @@ class Opal:
 
                     # Zero gradients after weight update
                     optimizer.zero_grad(set_to_none=True)
-                    scaler_used_this_cycle = False  # Reset scaler tracking for next cycle
 
                     # Update learning rate and global step only after actual weight updates
                     if global_step < warmup_steps:
