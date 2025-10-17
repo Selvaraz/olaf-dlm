@@ -1835,7 +1835,7 @@ class Opal:
         weight_decay=0.1,
         eval_freq=5,
         eval_iter=5,
-        start_context='If a user reports slow network access and you verify the router is not the bottleneck, the next logical step is to check the spanning-tree protocol. If STP shows no active loop, this confirms that the Layer 3 device is working but the Layer 2 device needs ',
+        start_context='The Spanning Tree Protocol (STP) is primarily used for the purpose of ',
         log_to_tensorboard=True,
         log_to_wandb=False,
         wandb_project="opal-training",
