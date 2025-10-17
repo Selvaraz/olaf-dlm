@@ -692,6 +692,25 @@ class Opal:
             # Training loop with gradient accumulation
             accumulated_loss = 0.0
             for batch_idx, (input_ids, targets, weights) in enumerate(pbar):
+                # 🔍 LoRA DEBUG: Periodically check LoRA parameter state
+                if has_lora and batch_idx % 100 == 0:  # Check every 100 batches
+                    lora_param_with_grad = 0
+                    lora_param_without_grad = 0
+                    for name, param in model.named_parameters():
+                        if 'lora_A' in name or 'lora_B' in name:
+                            if param.requires_grad:
+                                lora_param_with_grad += 1
+                            else:
+                                lora_param_without_grad += 1
+                    
+                    if lora_param_without_grad > 0:
+                        print(f"🚨 WARNING: {lora_param_without_grad} LoRA parameters lost requires_grad at batch {batch_idx}!")
+                        # Re-enable gradients for LoRA parameters
+                        for name, param in model.named_parameters():
+                            if ('lora_A' in name or 'lora_B' in name) and not param.requires_grad:
+                                param.requires_grad = True
+                                print(f"🔧 Re-enabled gradients for: {name}")
+                
                 # Move input and target tensors to the specified device
                 input_ids = input_ids.to(device, non_blocking=True)
                 targets = targets.to(device, non_blocking=True)
@@ -700,6 +719,40 @@ class Opal:
 
                 # Calculate loss for this batch
                 loss = self.calc_loss_batch(input_ids, targets, weights, model, device)
+                
+                # 🔍 DEBUG: Check if loss requires gradients
+                if not loss.requires_grad:
+                    print(f"🚨 CRITICAL: Loss does not require gradients!")
+                    print(f"🚨 Step: {global_step}, Batch: {batch_idx}")
+                    
+                    # Check which model parameters require gradients
+                    params_with_grad = []
+                    params_without_grad = []
+                    for name, param in model.named_parameters():
+                        if param.requires_grad:
+                            params_with_grad.append(name)
+                        else:
+                            params_without_grad.append(name)
+                    
+                    print(f"🔍 Parameters WITH gradients: {len(params_with_grad)}")
+                    if len(params_with_grad) <= 10:  # Only print if reasonable number
+                        for name in params_with_grad[:10]:
+                            print(f"   ✅ {name}")
+                    
+                    print(f"🔍 Parameters WITHOUT gradients: {len(params_without_grad)}")
+                    if len(params_without_grad) <= 10:  # Only print if reasonable number
+                        for name in params_without_grad[:10]:
+                            print(f"   ❌ {name}")
+                    
+                    # Check optimizer parameters
+                    optimizer_param_count = 0
+                    for group in optimizer.param_groups:
+                        optimizer_param_count += len(group['params'])
+                    print(f"🔍 Optimizer manages: {optimizer_param_count} parameters")
+                    
+                    # Skip this batch to avoid crash
+                    print(f"🚨 Skipping this batch to avoid crash!")
+                    continue
                 
                 # Scale loss by gradient accumulation steps to get the average
                 loss = loss / gradient_accumulation_steps
@@ -2186,6 +2239,23 @@ class Opal:
                 if not param.requires_grad:
                     print(f"❌ LoRA Parameter {i} does not require gradients!")
                     raise RuntimeError("LoRA Domain Adaptation: Found LoRA parameter that doesn't require gradients")
+            
+            # LoRA Domain Adaptation: Additional validation - ensure model is using LoRA
+            print(f"🔍 LoRA Model Validation:")
+            print(f"   Model has is_lora_enabled: {hasattr(model, 'is_lora_enabled')}")
+            if hasattr(model, 'is_lora_enabled'):
+                print(f"   Model is_lora_enabled(): {model.is_lora_enabled()}")
+            
+            # Check if model has lora_config
+            if hasattr(model, 'lora_config'):
+                print(f"   Model lora_config.use_lora: {model.lora_config.use_lora}")
+            
+            # Check if LoRA modules are actually injected
+            lora_module_count = 0
+            for name, module in model.named_modules():
+                if 'LoRA' in str(type(module)) or 'lora' in name.lower():
+                    lora_module_count += 1
+            print(f"   LoRA modules found in model: {lora_module_count}")
             
             # LoRA Domain Adaptation: Create optimizer with only LoRA parameters
             adamw_kwargs = dict(betas=(0.9, 0.95), lr=lr, weight_decay=weight_decay, eps=1e-8)

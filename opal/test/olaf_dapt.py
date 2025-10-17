@@ -82,8 +82,8 @@ def model_dapt_train(start_fresh=False):
         lr=DAPT_CONFIG["learning_rate"],     # Use config learning rate
         weight_decay=DAPT_CONFIG["weight_decay"],
         start_fresh=start_fresh,
-        eval_iter=1000,     # Large: Use more batches for thorough evaluation
-        eval_freq=3000,     # Large: Evaluate less frequently during LoRA DAPT
+        eval_iter=5,        # DEBUG: Small evaluation for fast debugging  
+        eval_freq=10,       # DEBUG: Evaluate every 10 steps for rapid issue detection
         batch_size=TRAINING_CONFIG["batch_size"],
     )
 
