@@ -1649,20 +1649,65 @@ class Opal:
         else:
             symlink_path = os.path.join(OpalConstants.CHECKPOINT_DIR, "finetune-latest.pt")
 
-        if os.path.exists(symlink_path):
-            if os.path.islink(symlink_path) or os.path.isfile(symlink_path):
-                os.remove(symlink_path)
-            elif os.path.isdir(symlink_path):
-                shutil.rmtree(symlink_path)
+        # LoRA Domain Adaptation: Enhanced symlink handling with better error recovery
+        if os.path.exists(symlink_path) or os.path.islink(symlink_path):
+            try:
+                if os.path.islink(symlink_path):
+                    os.unlink(symlink_path)  # Remove symlink specifically
+                elif os.path.isfile(symlink_path):
+                    os.remove(symlink_path)
+                elif os.path.isdir(symlink_path):
+                    shutil.rmtree(symlink_path)
+                print(f"🔧 Removed existing symlink: {symlink_path}")
+                
+                # Small delay to ensure filesystem sync
+                import time
+                time.sleep(0.1)
+                
+            except Exception as e:
+                print(f"⚠️ Warning: Could not remove existing symlink {symlink_path}: {e}")
+                # Try with force removal
+                try:
+                    import subprocess
+                    subprocess.run(['rm', '-rf', symlink_path], check=True)
+                    print(f"🔧 Force removed existing symlink: {symlink_path}")
+                    time.sleep(0.1)  # Allow filesystem to sync
+                except Exception as e2:
+                    print(f"❌ Failed to remove symlink even with force: {e2}")
         
-        # LoRA Domain Adaptation: For LoRA models, link to the checkpoint directory
-        # For standard models, link to the checkpoint file
-        if has_lora:
-            os.symlink(checkpoint_dir, symlink_path)
-            print(f"🎯 LoRA Domain Adaptation: Symlink created: {symlink_path} -> {checkpoint_dir}")
-        else:
-            os.symlink(checkpoint_path, symlink_path)
-            print(f"✅ Standard checkpoint symlink created: {symlink_path} -> {checkpoint_path}")
+        # LoRA Domain Adaptation: Create new symlink with error handling and retry
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if has_lora:
+                    os.symlink(checkpoint_dir, symlink_path)
+                    print(f"🎯 LoRA Domain Adaptation: Symlink created: {symlink_path} -> {checkpoint_dir}")
+                else:
+                    os.symlink(checkpoint_path, symlink_path)
+                    print(f"✅ Standard checkpoint symlink created: {symlink_path} -> {checkpoint_path}")
+                break  # Success, exit retry loop
+                
+            except FileExistsError as e:
+                if attempt < max_retries - 1:
+                    print(f"❌ Symlink creation failed (attempt {attempt + 1}/{max_retries}) - retrying: {e}")
+                    # Force cleanup and retry
+                    try:
+                        if os.path.exists(symlink_path):
+                            if os.path.islink(symlink_path):
+                                os.unlink(symlink_path)
+                            else:
+                                os.remove(symlink_path)
+                        time.sleep(0.2)  # Longer delay between retries
+                    except:
+                        pass
+                else:
+                    print(f"❌ Symlink creation failed after {max_retries} attempts: {e}")
+                    print(f"❌ Training can continue without symlink")
+                    
+            except Exception as e:
+                print(f"❌ Symlink creation failed: {e}")
+                print(f"❌ Training can continue without symlink")
+                break
 
         # LoRA Domain Adaptation: Return checkpoint directory path for LoRA models
         if has_lora:
