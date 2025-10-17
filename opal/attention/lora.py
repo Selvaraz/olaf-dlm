@@ -104,7 +104,7 @@ class LoRAInjectedLinear(nn.Module):
             
         # LoRA Domain Adaptation: Compute LoRA adaptation path
         # x @ A.T -> (B, T, rank), then @ B.T -> (B, T, out_features)
-        lora_out = self.lora_dropout(x) @ self.lora_A.t() @ self.lora_B.t()
+        lora_out = (self.lora_dropout(x) @ self.lora_A.t()) @ self.lora_B.t()
         
         # LoRA Domain Adaptation: Apply scaling and add to base output
         return base_out + lora_out * self.scaling
