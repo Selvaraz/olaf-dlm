@@ -671,6 +671,8 @@ class Opal:
         for epoch in range(num_epochs):
             model.train()  # Set model to training mode
             epoch_start_time = time.time()
+            accumulated_loss = 0.0
+            scaler_used_this_cycle = False  # Track if scaler was used in current accumulation cycle
 
             print(f"\n🔄 === EPOCH {epoch+1}/{num_epochs} STARTING ===")
             print(f"📊 Best validation loss so far: {best_val_loss:.6f}")
@@ -767,6 +769,7 @@ class Opal:
                 # Backpropagation with mixed precision if enabled
                 if use_mixed_precision:
                     scaler.scale(loss).backward()
+                    scaler_used_this_cycle = True  # Mark that scaler was used
                 else:
                     loss.backward()
 
@@ -777,7 +780,7 @@ class Opal:
                 if is_accumulation_step or is_last_batch:
                     total_norm = 0.0  # For gradient norm calculation
                     
-                    if use_mixed_precision:
+                    if use_mixed_precision and scaler_used_this_cycle:
                         # Unscale gradients before clipping
                         scaler.unscale_(optimizer)
                         
@@ -806,8 +809,11 @@ class Opal:
                             
                             # Clip gradients
                             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                        
+                        # Only step and update if we have accumulated gradients
                         scaler.step(optimizer)
                         scaler.update()
+                        scaler_used_this_cycle = False  # Reset for next accumulation cycle
             
                     else:
                         # Calculate gradient norm for logging
@@ -839,6 +845,7 @@ class Opal:
 
                     # Zero gradients after weight update
                     optimizer.zero_grad(set_to_none=True)
+                    scaler_used_this_cycle = False  # Reset scaler tracking for next cycle
 
                     # Update learning rate and global step only after actual weight updates
                     if global_step < warmup_steps:
