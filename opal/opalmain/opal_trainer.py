@@ -2,39 +2,36 @@ import json
 import random
 import tempfile
 import atexit
-import random
 import glob
 from datetime import datetime
 import multiprocessing
-import json
 import time
 import os
 import shutil
 import psutil
-import tempfile
-import atexit
-from opal.dataloader.OpalFileDataSet import OpalFileDataset
 import torch
 import math
-from pathlib import Path
 import matplotlib.pyplot as plt
+from pathlib import Path
 from matplotlib.ticker import MaxNLocator
 from typing import List, Optional, Union
+import sentencepiece as spm
+from tqdm import tqdm
+import torch.nn.functional as F
+import traceback  # 🔧 CRITICAL: Add traceback for error handling
+import wandb  # 🔧 CRITICAL: Add wandb import (even though commented out)
+
+# Opal imports
+from opal.dataloader.OpalFileDataSet import OpalFileDataset
 from ..dataloader.OpalDataSet import OpalDataset
 from ..dataloader.OpalFineTuneDataSet import OpalFinetuneDataset
 from torch.utils.data import Dataset, DataLoader
 from ..utils.opal_constants import OpalConstants
 from ..export.export_onnx import export_and_quantize_model
 from opal.config.opal_config import TRAINING_CONFIG, get_gpu_memory_allocated_size, get_scaler
-import sentencepiece as spm
-from tqdm import tqdm
 from ..export.opal_evaluator import evaluate_pytorch, evaluate_onnx
 from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR
-import torch.nn.functional as F
-#For TensorBoard logging
 from torch.utils.tensorboard import SummaryWriter
-# For weights and biases logging
-import wandb
 
 
 class Opal:
@@ -595,19 +592,37 @@ class Opal:
         max_grad_norm = self.config.get("max_grad_norm", 1.0)
         
         # LoRA Domain Adaptation: Detect LoRA based on config and model state
-        # For DAPT: Check config first (we're adding LoRA to pretrained model)
-        # For other modes: Check both config and model state
         config_has_lora = self.config.get('use_lora', False)
         model_has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
         has_lora = config_has_lora or model_has_lora
         
         # Debug logging for LoRA detection
         if self.is_dapt:
-            print(f"🎯 LoRA DAPT Detection: config_lora={config_has_lora}, model_lora={model_has_lora}, final_lora={has_lora}")
+            print(f"🎯 LoRA DAPT Detection:")
+            print(f"   config_lora={config_has_lora}")
+            print(f"   model_lora={model_has_lora}") 
+            print(f"   final_lora={has_lora}")
+            
+            # Verify LoRA parameters have gradients
+            if has_lora:
+                lora_params_with_grad = 0
+                lora_params_without_grad = 0
+                for name, param in model.named_parameters():
+                    if 'lora_A' in name or 'lora_B' in name:
+                        if param.requires_grad:
+                            lora_params_with_grad += 1
+                        else:
+                            lora_params_without_grad += 1
+                
+                print(f"   LoRA params with grad: {lora_params_with_grad}")
+                print(f"   LoRA params without grad: {lora_params_without_grad}")
+                
+                if lora_params_without_grad > 0:
+                    print("❌ WARNING: Some LoRA parameters don't have gradients!")
         
-        # Optional-LoRA-Finetune: Prioritize LoRA behavior when enabled (for both domain adaptation and LoRA fine-tuning)
+        # Optional-LoRA-Finetune: Prioritize LoRA behavior when enabled
         if has_lora:
-            default_accumulation = 2  # Moderate for LoRA (smaller updates, works for both domain adaptation and fine-tuning)
+            default_accumulation = 2  # Moderate for LoRA
         elif self.is_finetune:
             default_accumulation = 1  # Lower for traditional fine-tuning stability
         else:
@@ -619,12 +634,13 @@ class Opal:
             phase_desc = "LoRA fine-tuning" if self.is_finetune else "LoRA domain adaptation"
             print(f"🎯 {phase_desc}: Using gradient accumulation steps: {gradient_accumulation_steps}")
 
-        # # 🚨 CRITICAL FIX: Force disable mixed precision for fine-tuning to prevent CUDA errors
-        # if self.is_finetune:
-        #     use_mixed_precision = False
-        #     print(f"🔧 Mixed precision FORCED OFF for fine-tuning stability")
-        
-        scaler = get_scaler() if use_mixed_precision else None
+        # LoRA Domain Adaptation: Enhanced scaler handling
+        if use_mixed_precision:
+            scaler = get_scaler()
+            print(f"🎯 Mixed precision enabled with scaler: {type(scaler)}")
+        else:
+            scaler = None
+            print(f"🎯 Mixed precision disabled")
 
         # FINETUNE_PH2: Adaptive Warmup - both pretraining and fine-tuning benefit from warmup
         # Adjust total steps for gradient accumulation
@@ -672,7 +688,6 @@ class Opal:
             model.train()  # Set model to training mode
             epoch_start_time = time.time()
             accumulated_loss = 0.0
-            scaler_used_this_cycle = False  # Track if scaler was used in current accumulation cycle
 
             print(f"\n🔄 === EPOCH {epoch+1}/{num_epochs} STARTING ===")
             print(f"📊 Best validation loss so far: {best_val_loss:.6f}")
@@ -690,6 +705,11 @@ class Opal:
 
             # Initialize gradient accumulation for this epoch
             optimizer.zero_grad(set_to_none=True)
+
+            # LoRA Domain Adaptation: Verify optimizer has parameters at start of epoch
+            if has_lora and epoch == 0:
+                optimizer_param_count = sum(len(group['params']) for group in optimizer.param_groups)
+                print(f"🎯 LoRA DAPT: Optimizer managing {optimizer_param_count} parameters at epoch start")
 
             # Training loop with gradient accumulation
             accumulated_loss = 0.0
@@ -722,41 +742,35 @@ class Opal:
                 # Calculate loss for this batch
                 loss = self.calc_loss_batch(input_ids, targets, weights, model, device)
                 
-                # 🔍 DEBUG: Check if loss requires gradients
-                if not loss.requires_grad:
-                    print(f"🚨 CRITICAL: Loss does not require gradients!")
-                    print(f"🚨 Step: {global_step}, Batch: {batch_idx}")
-                    
-                    # Check which model parameters require gradients
-                    params_with_grad = []
-                    params_without_grad = []
-                    for name, param in model.named_parameters():
-                        if param.requires_grad:
-                            params_with_grad.append(name)
-                        else:
-                            params_without_grad.append(name)
-                    
-                    print(f"🔍 Parameters WITH gradients: {len(params_with_grad)}")
-                    if len(params_with_grad) <= 10:  # Only print if reasonable number
-                        for name in params_with_grad[:10]:
-                            print(f"   ✅ {name}")
-                    
-                    print(f"🔍 Parameters WITHOUT gradients: {len(params_without_grad)}")
-                    if len(params_without_grad) <= 10:  # Only print if reasonable number
-                        for name in params_without_grad[:10]:
-                            print(f"   ❌ {name}")
+                # LoRA Domain Adaptation: Validate loss has gradients
+                if has_lora and not loss.requires_grad:
+                    print(f"🚨 CRITICAL: Loss does not require gradients at batch {batch_idx}!")
+                    print(f"🚨 This indicates optimizer parameters are not in computation graph")
                     
                     # Check optimizer parameters
-                    optimizer_param_count = 0
+                    optimizer_param_ids = set()
                     for group in optimizer.param_groups:
-                        optimizer_param_count += len(group['params'])
-                    print(f"🔍 Optimizer manages: {optimizer_param_count} parameters")
+                        for p in group['params']:
+                            optimizer_param_ids.add(id(p))
+                    
+                    # Check which model parameters are in optimizer
+                    model_params_in_opt = 0
+                    model_params_not_in_opt = 0
+                    for name, param in model.named_parameters():
+                        if 'lora_A' in name or 'lora_B' in name:
+                            if id(param) in optimizer_param_ids:
+                                model_params_in_opt += 1
+                            else:
+                                model_params_not_in_opt += 1
+                                print(f"   ❌ LoRA param NOT in optimizer: {name}")
+                    
+                    print(f"   LoRA params in optimizer: {model_params_in_opt}")
+                    print(f"   LoRA params NOT in optimizer: {model_params_not_in_opt}")
                     
                     # Skip this batch to avoid crash
-                    print(f"🚨 Skipping this batch to avoid crash!")
                     continue
                 
-                # Scale loss by gradient accumulation steps to get the average
+                # Scale loss by gradient accumulation steps
                 loss = loss / gradient_accumulation_steps
                 accumulated_loss += loss.item()
 
@@ -766,10 +780,9 @@ class Opal:
                     print(f"🚨 Skipping this batch and continuing training...")
                     continue
 
-                # Backpropagation with mixed precision if enabled
-                if use_mixed_precision:
+                # LoRA Domain Adaptation: Enhanced backpropagation with proper scaler handling
+                if use_mixed_precision and scaler is not None:
                     scaler.scale(loss).backward()
-                    scaler_used_this_cycle = True  # Mark that scaler was used
                 else:
                     loss.backward()
 
@@ -778,106 +791,57 @@ class Opal:
                 is_last_batch = batch_idx == len(train_loader) - 1
                 
                 if is_accumulation_step or is_last_batch:
-                    total_norm = 0.0  # For gradient norm calculation
+                    total_norm = 0.0
                     
-                    if use_mixed_precision:
-                        # Only proceed with scaler operations if we actually used it
-                        if scaler_used_this_cycle:
-                            # Unscale gradients before clipping
-                            scaler.unscale_(optimizer)
-                            
-                            # Calculate gradient norm for logging
-                            if has_lora:
-                                # LoRA Domain Adaptation: Only use parameters in optimizer
-                                optimizer_params = []
-                                for group in optimizer.param_groups:
-                                    optimizer_params.extend(group['params'])
-                                
-                                for p in optimizer_params:
-                                    if p.grad is not None:
-                                        param_norm = p.grad.data.norm(2)
-                                        total_norm += param_norm.item() ** 2
-                                total_norm = total_norm ** 0.5
-                                
-                                # Clip gradients - only for parameters in optimizer
-                                torch.nn.utils.clip_grad_norm_(optimizer_params, max_norm=max_grad_norm)
-                            else:
-                                # Standard training: use all model parameters
-                                for p in model.parameters():
-                                    if p.grad is not None:
-                                        param_norm = p.grad.data.norm(2)
-                                        total_norm += param_norm.item() ** 2
-                                total_norm = total_norm ** 0.5
-                                
-                                # Clip gradients
-                                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-                            
-                            # Step and update only if we have accumulated gradients with scaler
-                            scaler.step(optimizer)
-                            scaler.update()
-                        else:
-                            # No scaling was done, just step normally
-                            if has_lora:
-                                optimizer_params = []
-                                for group in optimizer.param_groups:
-                                    optimizer_params.extend(group['params'])
-                                
-                                for p in optimizer_params:
-                                    if p.grad is not None:
-                                        param_norm = p.grad.data.norm(2)
-                                        total_norm += param_norm.item() ** 2
-                                total_norm = total_norm ** 0.5
-                                torch.nn.utils.clip_grad_norm_(optimizer_params, max_norm=max_grad_norm)
-                            else:
-                                for p in model.parameters():
-                                    if p.grad is not None:
-                                        param_norm = p.grad.data.norm(2)
-                                        total_norm += param_norm.item() ** 2
-                                total_norm = total_norm ** 0.5
-                                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-                            optimizer.step()
-                        
-                        # Reset scaler tracking for next accumulation cycle
-                        scaler_used_this_cycle = False
-            
+                    # LoRA Domain Adaptation: Get optimizer parameters correctly
+                    if has_lora:
+                        optimizer_params = []
+                        for group in optimizer.param_groups:
+                            optimizer_params.extend(group['params'])
                     else:
-                        # Non-mixed precision training
-                        if has_lora:
-                            # LoRA Domain Adaptation: Only use parameters in optimizer
-                            optimizer_params = []
-                            for group in optimizer.param_groups:
-                                optimizer_params.extend(group['params'])
-                                
-                            for p in optimizer_params:
-                                if p.grad is not None:
-                                    param_norm = p.grad.data.norm(2)
-                                    total_norm += param_norm.item() ** 2
-                            total_norm = total_norm ** 0.5
-                            
-                            # Clip gradients and step optimizer - only for parameters in optimizer
-                            torch.nn.utils.clip_grad_norm_(optimizer_params, max_norm=max_grad_norm)
-                        else:
-                            # Standard training: use all model parameters
-                            for p in model.parameters():
-                                if p.grad is not None:
-                                    param_norm = p.grad.data.norm(2)
-                                    total_norm += param_norm.item() ** 2
-                            total_norm = total_norm ** 0.5
-                            
-                            # Clip gradients and step optimizer
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                        optimizer_params = list(model.parameters())
+                    
+                    # LoRA Domain Adaptation: Enhanced gradient clipping and stepping
+                    if use_mixed_precision and scaler is not None:
+                        # Unscale gradients before clipping
+                        scaler.unscale_(optimizer)
+                        
+                        # Calculate gradient norm
+                        for p in optimizer_params:
+                            if p.grad is not None:
+                                param_norm = p.grad.data.norm(2)
+                                total_norm += param_norm.item() ** 2
+                        total_norm = total_norm ** 0.5
+                        
+                        # Clip gradients
+                        torch.nn.utils.clip_grad_norm_(optimizer_params, max_norm=max_grad_norm)
+                        
+                        # Step and update
+                        scaler.step(optimizer)
+                        scaler.update()
+                        
+                    else:
+                        # Non-mixed precision
+                        for p in optimizer_params:
+                            if p.grad is not None:
+                                param_norm = p.grad.data.norm(2)
+                                total_norm += param_norm.item() ** 2
+                        total_norm = total_norm ** 0.5
+                        
+                        # Clip and step
+                        torch.nn.utils.clip_grad_norm_(optimizer_params, max_norm=max_grad_norm)
                         optimizer.step()
 
                     # Zero gradients after weight update
                     optimizer.zero_grad(set_to_none=True)
 
-                    # Update learning rate and global step only after actual weight updates
+                    # Update learning rate and global step
                     if global_step < warmup_steps:
                         warmup_scheduler.step()
                     elif global_step == warmup_steps:
                         current_lr = optimizer.param_groups[0]["lr"]
-                        print(f"\n🔥 WARMUP COMPLETED! Transitioning to cosine annealing at step {global_step+1}")
-                        print(f"🔥 Learning rate at warmup completion: {current_lr:.2e}")
+                        print(f"\n🔥 WARMUP COMPLETED at step {global_step+1}")
+                        print(f"🔥 Learning rate: {current_lr:.2e}")
                         if scheduler:
                             scheduler.step()
                     else:
@@ -933,7 +897,7 @@ class Opal:
                     # Reset accumulated loss
                     accumulated_loss = 0.0
 
-                # Update tokens seen for every batch (not just accumulation steps)
+                # Update tokens seen
                 tokens_seen += input_ids.numel()
 
                 # Print a sample text after each epoch
@@ -944,16 +908,26 @@ class Opal:
                 # Evaluation - only check on actual weight update steps
                 if is_accumulation_step or is_last_batch:
                     # Adaptive evaluation frequency for pretraining vs fine-tuning
-                    eval_frequency = eval_freq if not self.is_finetune else max(eval_freq, 10)  # 🔧 FIXED: Lower eval freq for fine-tuning
+                    eval_frequency = eval_freq if not self.is_finetune else max(eval_freq, 10)
                     
-                    # 🔧 DEBUG: Log evaluation frequency once
-                    if global_step == 1:
-                        print(f"\n📊 Evaluation frequency set to: {eval_frequency} steps")
+                    # 🔧 H200 OPTIMIZATION: Adaptive eval_iter based on training progress
+                    if self.is_dapt:
+                        # Early training (first 20%): Use more batches for stability
+                        # Later training: Use fewer batches for speed
+                        progress = global_step / total_steps
+                        if progress < 0.2:
+                            adaptive_eval_iter = min(eval_iter, 1000)  # Max 1000 early
+                        elif progress < 0.5:
+                            adaptive_eval_iter = min(eval_iter, 500)   # 500 mid-training
+                        else:
+                            adaptive_eval_iter = min(eval_iter, 300)   # 300 late-training
+                    else:
+                        adaptive_eval_iter = eval_iter
                     
                     if global_step % eval_frequency == 0 and global_step > 0:
-                        print(f"\n📊 === STEP-BASED EVALUATION AT STEP {global_step} ===")
+                        print(f"\n📊 === EVALUATION AT STEP {global_step} (using {adaptive_eval_iter} batches) ===")
                         train_loss, val_loss = self.evaluate_model(
-                            model, train_loader, val_loader, device, eval_iter)
+                            model, train_loader, val_loader, device, adaptive_eval_iter)
                         train_losses.append(train_loss)
                         val_losses.append(val_loss)
                         track_tokens_seen.append(tokens_seen)
@@ -1593,10 +1567,20 @@ class Opal:
         Returns:
             str: Path to the saved checkpoint file.
         """
-        # LoRA Domain Adaptation: Check if model has LoRA adapters (config or model state)
+        # LoRA Domain Adaptation: Check if model has LoRA adapters
         config_has_lora = config.get('use_lora', False)
         model_has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
         has_lora = config_has_lora or model_has_lora
+        
+        # Validate LoRA state before saving
+        if has_lora:
+            if not hasattr(model, 'lora_config'):
+                print("❌ LoRA CRITICAL: Model missing lora_config attribute!")
+                raise RuntimeError("LoRA Domain Adaptation: Cannot save - model missing lora_config")
+            
+            if not hasattr(model, 'get_lora_info'):
+                print("❌ LoRA CRITICAL: Model missing get_lora_info method!")
+                raise RuntimeError("LoRA Domain Adaptation: Cannot save - model missing LoRA methods")
         
         checkpoint = {
             "model_state_dict": model.state_dict(),
@@ -1607,11 +1591,10 @@ class Opal:
             "val_losses": val_losses,
             "config": config,
             "tokenizer_model": tokenizer_model,
-            # LoRA Domain Adaptation: Add LoRA metadata
             "has_lora": has_lora,
         }
 
-        # Create a directory with current date and save the model inside the path
+        # Create checkpoint directory
         date_dir = datetime.now().strftime("%Y%m%d")
         if not self.is_finetune:
             checkpoint_dir = os.path.join(OpalConstants.CHECKPOINT_DIR, date_dir, timestamp)
@@ -1625,18 +1608,7 @@ class Opal:
         if has_lora:
             print("🎯 LoRA Domain Adaptation: Saving LoRA checkpoints...")
             
-            # LoRA Domain Adaptation: Validate LoRA configuration and model state
-            if not hasattr(model, 'lora_config'):
-                print("❌ LoRA Domain Adaptation: Model missing lora_config attribute!")
-                print("❌ This indicates the model was not properly initialized with LoRA adapters")
-                raise RuntimeError("LoRA Domain Adaptation: Model missing required lora_config attribute")
-            
-            if not hasattr(model, 'is_lora_enabled') or not model.is_lora_enabled():
-                print("❌ LoRA Domain Adaptation: Model does not have LoRA enabled!")
-                print("❌ This indicates LoRA injection failed or was not performed")
-                raise RuntimeError("LoRA Domain Adaptation: Model LoRA injection verification failed")
-            
-            # LoRA Domain Adaptation: Create subdirectories for different checkpoint types
+            # Create subdirectories
             base_dir = os.path.join(checkpoint_dir, "base")
             lora_dir = os.path.join(checkpoint_dir, "lora") 
             merged_dir = os.path.join(checkpoint_dir, "merged")
@@ -1644,14 +1616,19 @@ class Opal:
             os.makedirs(lora_dir, exist_ok=True)
             os.makedirs(merged_dir, exist_ok=True)
             
-            # LoRA Domain Adaptation: Save base model checkpoint (existing functionality)
+            # Save base model checkpoint
             base_checkpoint_path = os.path.join(base_dir, f"opal_gpt_base_{timestamp}.pt")
             torch.save(checkpoint, base_checkpoint_path)
-            print(f"🎯 LoRA Domain Adaptation: Saved base checkpoint: {base_checkpoint_path}")
+            print(f"🎯 LoRA: Saved base checkpoint: {base_checkpoint_path}")
             
-            # LoRA Domain Adaptation: Get LoRA configuration and base model info
+            # Get LoRA info and config
             lora_config = model.lora_config
-            print(f"🎯 LoRA Configuration: {lora_config.to_dict()}")
+            lora_info = model.get_lora_info()
+            
+            print(f"🎯 LoRA Model Info:")
+            print(f"   Total LoRA modules: {lora_info['total_lora_modules']}")
+            print(f"   Total LoRA parameters: {lora_info['total_lora_parameters']:,}")
+            print(f"   LoRA percentage: {lora_info['lora_percentage']:.2f}%")
             
             base_model_info = {
                 "checkpoint_path": base_checkpoint_path,
@@ -1662,61 +1639,63 @@ class Opal:
                 "n_layers": config.get("n_layers", 12),
             }
             
-            # LoRA Domain Adaptation: Get LoRA statistics for logging
-            lora_info = model.get_lora_info()
-            print(f"🎯 LoRA Model Info:")
-            print(f"   Total LoRA modules: {lora_info['total_lora_modules']}")
-            print(f"   Total LoRA parameters: {lora_info['total_lora_parameters']:,}")
-            print(f"   LoRA percentage: {lora_info['lora_percentage']:.2f}%")
-            
-            # LoRA Domain Adaptation: Save LoRA adapter weights
+            # Save LoRA adapter weights
             from ..attention.lora_utils import save_lora_adapters
             adapter_path = os.path.join(lora_dir, f"lora_adapter_{timestamp}")
-            lora_manifest = save_lora_adapters(
-                model=model,
-                save_path=adapter_path,
-                lora_config=lora_config,
-                base_model_info=base_model_info,
-                format=lora_config.checkpoint_format
-            )
-            print(f"🎯 LoRA Domain Adaptation: Saved LoRA adapters: {adapter_path}")
-            print(f"🎯 LoRA Manifest Info: {lora_manifest['total_adapters']} adapters, {lora_manifest['total_parameters']:,} parameters")
             
-            # LoRA Domain Adaptation: Create and save merged model if configured
+            try:
+                lora_manifest = save_lora_adapters(
+                    model=model,
+                    save_path=adapter_path,
+                    lora_config=lora_config,
+                    base_model_info=base_model_info,
+                    format=lora_config.checkpoint_format
+                )
+                print(f"🎯 LoRA: Saved adapters: {adapter_path}")
+                print(f"🎯 LoRA Manifest: {lora_manifest['total_adapters']} adapters, {lora_manifest['total_parameters']:,} params")
+            except Exception as e:
+                print(f"❌ Failed to save LoRA adapters: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # Create and save merged model if configured
             if lora_config.merge_on_finalize:
-                print("🎯 LoRA Domain Adaptation: Creating merged model checkpoint...")
+                print("🎯 LoRA: Creating merged model checkpoint...")
                 
-                # LoRA Domain Adaptation: Use the proper merging utility function
                 from ..attention.lora_utils import merge_lora_weights
-                try:
-                    # Create merged model without expensive deep copy
-                    print("🎯 LoRA Domain Adaptation: Merging LoRA adapters into base weights...")
-                    merged_model = merge_lora_weights(model, verbose=True)
-                    
-                    # LoRA Domain Adaptation: Save merged checkpoint
-                    merged_checkpoint = checkpoint.copy()
-                    merged_checkpoint["model_state_dict"] = merged_model.state_dict()
-                    merged_checkpoint["merged_from_lora"] = True
-                    merged_checkpoint["lora_config"] = lora_config.to_dict()
-                    
-                    merged_checkpoint_path = os.path.join(merged_dir, f"opal_gpt_merged_{timestamp}.pt")
-                    torch.save(merged_checkpoint, merged_checkpoint_path)
-                    print(f"🎯 LoRA Domain Adaptation: Saved merged checkpoint: {merged_checkpoint_path}")
-                    
-                except Exception as merge_error:
-                    print(f"❌ LoRA Domain Adaptation: Failed to create merged checkpoint: {merge_error}")
-                    print(f"⚠️ LoRA Domain Adaptation: Continuing with base and adapter checkpoints only")
-            else:
-                print("🎯 LoRA Domain Adaptation: Skipping merged checkpoint (merge_on_finalize=False)")
+                
+                # LoRA Domain Adaptation: merge_lora_weights now handles the copy internally
+                # No need to copy here - let the utility function handle it defensively
+                merged_model = merge_lora_weights(model, verbose=True)
+                
+                # 🔧 CRITICAL FIX: Create checkpoint dict for merged model
+                merged_checkpoint_dict = {
+                    "model_state_dict": merged_model.state_dict(),  # <-- Use merged model's state!
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+                    "epoch": epoch,
+                    "train_losses": train_losses,
+                    "val_losses": val_losses,
+                    "config": config,
+                    "tokenizer_model": tokenizer_model,
+                    "has_lora": False,  # Merged model has no active LoRA
+                    "is_merged": True,  # Flag to indicate this is a merged checkpoint
+                }
+                
+                # Save merged checkpoint
+                merged_checkpoint_path = os.path.join(merged_dir, f"opal_gpt_merged_{timestamp}.pt")
+                torch.save(merged_checkpoint_dict, merged_checkpoint_path)  # <-- Save merged dict!
+                print(f"🎯 LoRA: Saved merged checkpoint: {merged_checkpoint_path}")
+                
+                # Note: No need to clean up model_copy since merge_lora_weights manages its own copy
             
-            # LoRA Domain Adaptation: Update main checkpoint path to point to base
             checkpoint_path = base_checkpoint_path
             
         else:
-            # LoRA Domain Adaptation: Standard checkpointing for non-LoRA models
+            # Standard checkpointing
             torch.save(checkpoint, checkpoint_path)
 
-        # Copy the tokenizer model to the checkpoint directory (if available)
+        # Copy tokenizer model
         if tokenizer_model and os.path.exists(tokenizer_model):
             tokenizer_model_path = os.path.join(checkpoint_dir, "opal_tokenizer.model")
             try:
@@ -1724,115 +1703,70 @@ class Opal:
                 print(f"✅ Tokenizer model copied to checkpoint directory")
             except Exception as e:
                 print(f"⚠️ Warning: Could not copy tokenizer model: {e}")
-        else:
-            print(f"⚠️ Warning: Tokenizer model path not provided or doesn't exist, skipping copy")
 
-        # Create a symlink to the latest checkpoint
+        # Create symlink
         if not self.is_finetune:
             symlink_path = os.path.join(OpalConstants.CHECKPOINT_DIR, "checkpoint-latest.pt")
         else:
             symlink_path = os.path.join(OpalConstants.CHECKPOINT_DIR, "finetune-latest.pt")
 
-        # LoRA Domain Adaptation: Enhanced symlink handling with better error recovery
+        # Enhanced symlink handling
         if os.path.exists(symlink_path) or os.path.islink(symlink_path):
             try:
                 if os.path.islink(symlink_path):
-                    os.unlink(symlink_path)  # Remove symlink specifically
+                    os.unlink(symlink_path)
                 elif os.path.isfile(symlink_path):
                     os.remove(symlink_path)
                 elif os.path.isdir(symlink_path):
                     shutil.rmtree(symlink_path)
-                print(f"🔧 Removed existing symlink: {symlink_path}")
-                
-                # Small delay to ensure filesystem sync
                 import time
                 time.sleep(0.1)
-                
             except Exception as e:
-                print(f"⚠️ Warning: Could not remove existing symlink {symlink_path}: {e}")
-                # Try with force removal
-                try:
-                    import subprocess
-                    subprocess.run(['rm', '-rf', symlink_path], check=True)
-                    print(f"🔧 Force removed existing symlink: {symlink_path}")
-                    time.sleep(0.1)  # Allow filesystem to sync
-                except Exception as e2:
-                    print(f"❌ Failed to remove symlink even with force: {e2}")
+                print(f"⚠️ Could not remove existing symlink: {e}")
         
-        # LoRA Domain Adaptation: Create new symlink with error handling and retry
+        # Create new symlink with retry
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 if has_lora:
                     os.symlink(checkpoint_dir, symlink_path)
-                    print(f"🎯 LoRA Domain Adaptation: Symlink created: {symlink_path} -> {checkpoint_dir}")
                 else:
                     os.symlink(checkpoint_path, symlink_path)
-                    print(f"✅ Standard checkpoint symlink created: {symlink_path} -> {checkpoint_path}")
-                break  # Success, exit retry loop
-                
-            except FileExistsError as e:
-                if attempt < max_retries - 1:
-                    print(f"❌ Symlink creation failed (attempt {attempt + 1}/{max_retries}) - retrying: {e}")
-                    # Force cleanup and retry
-                    try:
-                        if os.path.exists(symlink_path):
-                            if os.path.islink(symlink_path):
-                                os.unlink(symlink_path)
-                            else:
-                                os.remove(symlink_path)
-                        time.sleep(0.2)  # Longer delay between retries
-                    except:
-                        pass
-                else:
-                    print(f"❌ Symlink creation failed after {max_retries} attempts: {e}")
-                    print(f"❌ Training can continue without symlink")
-                    
-            except Exception as e:
-                print(f"❌ Symlink creation failed: {e}")
-                print(f"❌ Training can continue without symlink")
+                print(f"✅ Symlink created: {symlink_path}")
                 break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(0.2)
+                else:
+                    print(f"❌ Symlink creation failed: {e}")
 
-        # LoRA Domain Adaptation: Return checkpoint directory path for LoRA models
         if has_lora:
-            print(f"🎯 LoRA Domain Adaptation: All checkpoints saved in: {checkpoint_dir}")
-            print(f"🎯 LoRA Domain Adaptation: Structure:")
-            print(f"   📁 {checkpoint_dir}/")
-            print(f"     📁 base/     - Base model with LoRA structure")
-            print(f"     📁 lora/     - LoRA adapter weights only") 
-            print(f"     📁 merged/   - Merged unified model (if enabled)")
-            return checkpoint_dir  # LoRA Domain Adaptation: Return directory containing all checkpoint types
+            print(f"🎯 LoRA: All checkpoints saved in: {checkpoint_dir}")
+            return checkpoint_dir
         else:
-            return checkpoint_path  # LoRA Domain Adaptation: Return single file path for non-LoRA models
-
+            return checkpoint_path
 
     def load_model_checkpoint(self, model_class, checkpoint_path, device="cpu", start_fresh=False, create_new=True):
         """
         Loads a trained model checkpoint and restores model, optimizer, and training state.
-
-        Args:
-            model_class (type): The class of the model (e.g., OpalGPT).
-            checkpoint_path (str): Path to the checkpoint file.
-            device (str): Device to load model on ('cpu' or 'cuda').
-            start_fresh (bool): Whether to start training from scratch.
-
-        Returns:
-            model (torch.nn.Module): Loaded model with restored weights.
-            optimizer_state_dict (dict): State dict for optimizer (can be used to resume training).
-            epoch (int): Last epoch from checkpoint.
-            train_losses (list): Training loss history.
-            val_losses (list): Validation loss history.
-            config (dict): Model configuration dictionary.
+        
+        LoRA Domain Adaptation: Enhanced to properly handle loading pretrained models
+        and injecting LoRA adapters for continued training.
         """
         checkpoint = {}
         optimizer_state_dict= None
         scheduler_state_dict = None
         config = self.config
 
+        # LoRA Domain Adaptation: Validate checkpoint requirements
         if self.is_finetune and not os.path.isfile(os.path.realpath(checkpoint_path)):
-            print("*** Checkpoint not found for finetuning. Please provide a valid checkpoint path")
+            print("❌ Checkpoint not found for finetuning. Please provide a valid checkpoint path")
             exit(1)
             
+        if self.is_dapt and not os.path.isfile(os.path.realpath(checkpoint_path)):
+            print("❌ Checkpoint not found for DAPT. Please provide a valid pretrained checkpoint path")
+            exit(1)
 
         if ((create_new == False) and (not os.path.isfile(os.path.realpath(checkpoint_path)))):
             raise ValueError("Checkpoint not found and create_new is False")
@@ -1840,9 +1774,9 @@ class Opal:
         if (not os.path.isfile(os.path.realpath(checkpoint_path))) or start_fresh:
             print(f"⚠️ Checkpoint {checkpoint_path} not found (or) start_fresh is requested. Creating new model.")
             model = model_class(self.config).to(device)
-            model_config = self.config  # Use current config for new model
+            model_config = self.config
         else:
-            print(f"✅ Model loaded from {checkpoint_path}")
+            print(f"✅ Loading checkpoint from {checkpoint_path}")
             checkpoint = torch.load(os.path.realpath(checkpoint_path), map_location=device)
             
             # Display checkpoint training metrics
@@ -1853,8 +1787,6 @@ class Opal:
             if train_losses and val_losses:
                 final_train_loss = train_losses[-1] if train_losses else "N/A"
                 final_val_loss = val_losses[-1] if val_losses else "N/A"
-                
-                # Calculate perplexity from loss (perplexity = exp(loss))
                 train_perplexity = math.exp(final_train_loss) if isinstance(final_train_loss, (int, float)) else "N/A"
                 val_perplexity = math.exp(final_val_loss) if isinstance(final_val_loss, (int, float)) else "N/A"
                 
@@ -1864,116 +1796,285 @@ class Opal:
             else:
                 print("📊 No loss history found in checkpoint")
             
-            # Load model with appropriate config based on training mode
             checkpoint_config = checkpoint["config"]
             
-            # LoRA Domain Adaptation: Use current config (with LoRA) for DAPT, checkpoint config otherwise
+            # LoRA Domain Adaptation: For DAPT, create model WITH LoRA using current config
             if self.is_dapt:
-                print("🎯 LoRA DAPT: Using current config (with LoRA) to create model architecture")
-                model_config = self.config  # Use current config which has use_lora=True
-                # Preserve critical architecture params from checkpoint
-                model_config.update({
-                    'vocab_size': checkpoint_config.get('vocab_size'),
-                    'emb_dim': checkpoint_config.get('emb_dim'), 
-                    'n_layers': checkpoint_config.get('n_layers'),
-                    'n_heads': checkpoint_config.get('n_heads'),
-                    'context_length': checkpoint_config.get('context_length'),
-                })
-            else:
-                model_config = checkpoint_config
+                print("🎯 LoRA DAPT: Creating model with LoRA adapters for domain adaptation")
                 
-            model = model_class(model_config).to(device)
-            missing, unexpected = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-            
-            # LoRA Domain Adaptation: Handle weight transfer from standard to LoRA-injected layers
-            if self.is_dapt and hasattr(model, 'is_lora_enabled') and model.is_lora_enabled():
-                print("🎯 LoRA DAPT: Transferring weights from standard layers to LoRA-injected layers...")
+                # Start with checkpoint config for architecture
+                model_config = checkpoint_config.copy()
                 
-                # Transfer weights from unexpected keys (standard layers) to missing keys (LoRA layers)
+                # Override with LoRA settings from current config
+                lora_keys = ['use_lora', 'lora_rank', 'lora_alpha', 'lora_dropout', 
+                            'target_modules', 'lora_include_mlp']
+                for key in lora_keys:
+                    if key in self.config:
+                        model_config[key] = self.config[key]
+                
+                # Map alternative names
+                if 'lora_rank' in model_config:
+                    model_config['rank'] = model_config['lora_rank']
+                if 'lora_alpha' in model_config:
+                    model_config['alpha'] = model_config['lora_alpha']
+                if 'lora_dropout' in model_config:
+                    model_config['dropout'] = model_config['lora_dropout']
+                
+                print(f"🎯 LoRA DAPT: Model config:")
+                print(f"   use_lora: {model_config.get('use_lora', False)}")
+                print(f"   rank: {model_config.get('rank', 'N/A')}")
+                print(f"   alpha: {model_config.get('alpha', 'N/A')}")
+                print(f"   dropout: {model_config.get('dropout', 'N/A')}")
+                
+                # Create model with LoRA - this will trigger LoRA injection in __init__
+                print(f"🎯 LoRA DAPT: Creating model (LoRA injection will happen in __init__)...")
+                model = model_class(model_config).to(device)
+                
+                # LoRA Domain Adaptation: CRITICAL - Save LoRA module references BEFORE loading weights
+                from ..attention.lora import LoRAInjectedLinear
+                lora_modules_before = {}
+                for name, module in model.named_modules():
+                    if isinstance(module, LoRAInjectedLinear):
+                        lora_modules_before[name] = id(module)
+                
+                print(f"✅ LoRA modules BEFORE weight loading: {len(lora_modules_before)}")
+                
+                # LoRA Domain Adaptation: Verify LoRA was actually injected
+                lora_enabled = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
+                if not lora_enabled:
+                    print("❌ CRITICAL: LoRA injection failed in model __init__!")
+                    raise RuntimeError("LoRA injection failed - model creation did not enable LoRA")
+                
+                print(f"✅ LoRA injection verified: model.is_lora_enabled() = {lora_enabled}")
+                
+                # LoRA Domain Adaptation: Verify LoRA modules exist
+                lora_module_count = sum(1 for m in model.modules() if isinstance(m, LoRAInjectedLinear))
+                print(f"✅ Found {lora_module_count} LoRAInjectedLinear modules in model")
+                
+                if lora_module_count == 0:
+                    print("❌ CRITICAL: No LoRAInjectedLinear modules found!")
+                    raise RuntimeError("LoRA injection verification failed - no LoRA modules in model")
+                
+                # Now load pretrained weights into the LoRA model
+                print("🎯 LoRA DAPT: Loading pretrained weights into LoRA model...")
                 checkpoint_state = checkpoint["model_state_dict"]
-                transferred_count = 0
                 
-                # Create mapping from unexpected (standard) to missing (LoRA) keys
-                for missing_key in list(missing):
-                    if '.base_linear.weight' in missing_key:
-                        # Map: transformers_block.0.mhAttention.Wq.base_linear.weight
-                        # To:  transformers_block.0.mhAttention.Wq.weight
-                        standard_key = missing_key.replace('.base_linear.weight', '.weight')
-                        if standard_key in unexpected and standard_key in checkpoint_state:
-                            # Get the target parameter in the model
-                            keys = missing_key.split('.')
-                            target = model
-                            for key in keys[:-1]:
-                                target = getattr(target, key)
-                            # Set the weight
-                            target.weight.data.copy_(checkpoint_state[standard_key])
-                            transferred_count += 1
-                            print(f"    Transferred: {standard_key} → {missing_key}")
+                # Get current model state to see what we're working with
+                model_state = model.state_dict()
+                
+                # 🔍 CRITICAL DEBUG: Show what keys we're working with
+                print("\n🔍 CRITICAL DEBUG: Checkpoint vs Model Keys")
+                
+                # Sample checkpoint keys
+                ckpt_keys = list(checkpoint_state.keys())
+                print(f"\n📋 Sample checkpoint keys ({len(ckpt_keys)} total):")
+                attention_keys = [k for k in ckpt_keys if any(x in k for x in ['Wq', 'Wk', 'Wv', 'out_proj', 'attention'])]
+                for key in attention_keys[:10]:  # Show first 10 attention keys
+                    print(f"   {key}")
+                
+                # Sample model keys
+                model_keys = list(model_state.keys())
+                print(f"\n📋 Sample model keys ({len(model_keys)} total):")
+                lora_keys = [k for k in model_keys if 'lora' in k.lower() or any(x in k for x in ['Wq', 'Wk', 'Wv', 'out_proj'])]
+                for key in lora_keys[:10]:  # Show first 10 LoRA/attention keys
+                    print(f"   {key}")
+                
+                # Map checkpoint keys to model keys
+                transferred_weights = {}
+                mapping_stats = {'direct': 0, 'mapped': 0, 'unmapped': 0}
+                
+                for ckpt_key, ckpt_value in checkpoint_state.items():
+                    matched = False
                     
-                    elif '.base_linear.bias' in missing_key:
-                        # Map: transformers_block.0.mhAttention.Wq.base_linear.bias
-                        # To:  transformers_block.0.mhAttention.Wq.bias
-                        standard_key = missing_key.replace('.base_linear.bias', '.bias')
-                        if standard_key in unexpected and standard_key in checkpoint_state:
-                            # Get the target parameter in the model
-                            keys = missing_key.split('.')
-                            target = model
-                            for key in keys[:-1]:
-                                target = getattr(target, key)
-                            # Set the bias
-                            target.bias.data.copy_(checkpoint_state[standard_key])
-                            transferred_count += 1
-                            print(f"    Transferred: {standard_key} → {missing_key}")
+                    if ckpt_key in model_state:
+                        # Direct match (embeddings, layer norms, etc.)
+                        transferred_weights[ckpt_key] = ckpt_value
+                        mapping_stats['direct'] += 1
+                        matched = True
+                    else:
+                        # Try to map attention layers to base_linear
+                        # Pattern 1: transformers_block.X.mhAttention.Wq.weight -> transformers_block.X.mhAttention.Wq.base_linear.weight
+                        if any(attn_key in ckpt_key for attn_key in ['Wq.weight', 'Wk.weight', 'Wv.weight', 'out_proj.weight',
+                                                                       'Wq.bias', 'Wk.bias', 'Wv.bias', 'out_proj.bias']):
+                            # Replace .weight or .bias with .base_linear.weight/bias
+                            if '.weight' in ckpt_key:
+                                lora_key = ckpt_key.replace('.weight', '.base_linear.weight')
+                            elif '.bias' in ckpt_key:
+                                lora_key = ckpt_key.replace('.bias', '.base_linear.bias')
+                            else:
+                                lora_key = None
+                            
+                            if lora_key and lora_key in model_state:
+                                transferred_weights[lora_key] = ckpt_value
+                                mapping_stats['mapped'] += 1
+                                matched = True
+                                if mapping_stats['mapped'] <= 5:  # Show first 5 mappings
+                                    print(f"✅ Mapped: {ckpt_key} -> {lora_key}")
+                        
+                        # Pattern 2: Try MLP layers if lora_include_mlp is True
+                        if not matched and model_config.get('lora_include_mlp', False):
+                            if any(mlp_key in ckpt_key for mlp_key in ['w1.weight', 'w2.weight', 'w3.weight',
+                                                                        'w1.bias', 'w2.bias', 'w3.bias']):
+                                if '.weight' in ckpt_key:
+                                    lora_key = ckpt_key.replace('.weight', '.base_linear.weight')
+                                elif '.bias' in ckpt_key:
+                                    lora_key = ckpt_key.replace('.bias', '.base_linear.bias')
+                                else:
+                                    lora_key = None
+                                
+                                if lora_key and lora_key in model_state:
+                                    transferred_weights[lora_key] = ckpt_value
+                                    mapping_stats['mapped'] += 1
+                                    matched = True
+                    
+                    if not matched:
+                        # Keep original key for non-attention layers
+                        transferred_weights[ckpt_key] = ckpt_value
+                        mapping_stats['unmapped'] += 1
                 
-                print(f"🎯 LoRA DAPT: Successfully transferred {transferred_count} weights to LoRA base layers")
-                print(f"🎯 LoRA DAPT: LoRA adapter weights (lora_A, lora_B) initialized with zeros - ready for training!")
-            
-            # ✅ CRITICAL DEBUG: Check for vocab size mismatches in loaded model
-            print(f"🔍 CHECKPOINT LOADING DEBUG:")
-            print(f"   Missing keys: {len(missing)} - {missing[:5] if missing else 'None'}")
-            print(f"   Unexpected keys: {len(unexpected)} - {unexpected[:5] if unexpected else 'None'}")
-            
-            # Check if embedding/output layers were properly loaded
-            embedding_loaded = not any('token_embeddings' in key or 'token_emb' in key for key in missing)
-            output_loaded = not any('out_head' in key or 'output' in key for key in missing)
-            
-            print(f"   Token embeddings loaded: {embedding_loaded}")
-            print(f"   Output head loaded: {output_loaded}")
-            
-            if not embedding_loaded:
-                print(f"🚨 CRITICAL: Token embeddings not loaded from checkpoint!")
-                print(f"   This indicates vocab size mismatch between checkpoint and current config")
-            if not output_loaded:
-                print(f"🚨 CRITICAL: Output head not loaded from checkpoint!")
-                print(f"   This indicates vocab size mismatch between checkpoint and current config")
+                print(f"\n📊 Weight Mapping Statistics:")
+                print(f"   Direct matches: {mapping_stats['direct']}")
+                print(f"   Mapped (attention->base_linear): {mapping_stats['mapped']}")
+                print(f"   Unmapped (kept original): {mapping_stats['unmapped']}")
+                print(f"   Total transferred: {len(transferred_weights)}")
                 
-            # Check actual model dimensions after loading
-            actual_emb_size = model.token_embeddings.num_embeddings if hasattr(model, 'token_embeddings') else 'N/A'
-            actual_out_size = model.out_head.out_features if hasattr(model, 'out_head') else 'N/A'
-            config_vocab = self.config.get('vocab_size', 'N/A')
+                # Load weights with strict=False to allow LoRA parameters to be missing
+                missing_keys, unexpected_keys = model.load_state_dict(transferred_weights, strict=False)
+                
+                print(f"\n🎯 LoRA DAPT: Weight loading summary:")
+                print(f"   Transferred: {len(transferred_weights)} weights")
+                print(f"   Missing: {len(missing_keys)} keys")
+                print(f"   Unexpected: {len(unexpected_keys)} keys")
+                
+                # 🔍 CRITICAL: Show which attention weights were NOT loaded
+                missing_attention = [k for k in missing_keys if 'base_linear' in k]
+                if missing_attention:
+                    print(f"\n🚨 WARNING: Missing base_linear weights for attention layers:")
+                    for key in missing_attention[:10]:
+                        print(f"   ❌ {key}")
+                
+                # CRITICAL: Verify LoRA modules STILL EXIST after weight loading
+                lora_modules_after = {}
+                for name, module in model.named_modules():
+                    if isinstance(module, LoRAInjectedLinear):
+                        lora_modules_after[name] = id(module)
+                
+                print(f"✅ LoRA modules AFTER weight loading: {len(lora_modules_after)}")
+                
+                # Check if module instances changed (this would be BAD)
+                if len(lora_modules_before) != len(lora_modules_after):
+                    print("❌ CRITICAL: Number of LoRA modules changed after weight loading!")
+                    print(f"   Before: {len(lora_modules_before)}, After: {len(lora_modules_after)}")
+                    raise RuntimeError("LoRA modules were replaced during weight loading!")
+                
+                modules_changed = []
+                for name in lora_modules_before:
+                    if name not in lora_modules_after:
+                        modules_changed.append(name)
+                    elif lora_modules_before[name] != lora_modules_after[name]:
+                        modules_changed.append(f"{name} (ID changed)")
+                
+                if modules_changed:
+                    print("❌ CRITICAL: LoRA module instances changed during weight loading!")
+                    for name in modules_changed[:5]:  # Show first 5
+                        print(f"   Changed: {name}")
+                    raise RuntimeError("LoRA module instances were replaced during weight loading!")
+                
+                # Verify LoRA parameters are in missing keys (they should be since they're new)
+                lora_missing = [k for k in missing_keys if 'lora_A' in k or 'lora_B' in k]
+                print(f"   LoRA adapters in missing: {len(lora_missing)} (expected - they're new parameters)")
+                
+                # CRITICAL: Verify base_linear weights were loaded
+                base_linear_loaded = any('base_linear' in k for k in transferred_weights.keys())
+                print(f"   Base linear weights loaded: {base_linear_loaded}")
+                
+                if not base_linear_loaded:
+                    print("⚠️ WARNING: No base_linear weights found in transferred weights!")
+                
+                # Final verification: Test forward pass to ensure gradients flow
+                print("🔍 Testing gradient flow through LoRA modules...")
+                model.train()
+                test_input = torch.randint(0, model_config['vocab_size'], (1, 10)).to(device)
+                test_output = model(test_input)
+                test_loss = test_output['logits'].sum()
+                
+                # Check if loss requires grad
+                if not test_loss.requires_grad:
+                    print("❌ CRITICAL: Test loss does not require gradients!")
+                    print("❌ This means LoRA parameters are not in the computation graph")
+                    raise RuntimeError("LoRA parameters not in computation graph after loading")
+                
+                # Try backward to verify gradients
+                test_loss.backward()
+                
+                # Check if LoRA parameters have gradients
+                lora_params_with_grad = 0
+                for name, param in model.named_parameters():
+                    if ('lora_A' in name or 'lora_B' in name) and param.grad is not None:
+                        lora_params_with_grad += 1
+                
+                print(f"✅ Test backward pass successful: {lora_params_with_grad} LoRA params have gradients")
+                
+                if lora_params_with_grad == 0:
+                    print("❌ CRITICAL: No LoRA parameters received gradients in test!")
+                    raise RuntimeError("LoRA parameters not receiving gradients")
+                
+                # Zero gradients after test
+                model.zero_grad()
+                
+                # Final verification: Check that LoRA modules have non-zero base weights
+                sample_verified = False
+                for name, module in model.named_modules():
+                    if isinstance(module, LoRAInjectedLinear):
+                        base_weight_norm = module.base_linear.weight.norm().item()
+                        lora_a_norm = module.lora_A.norm().item()
+                        lora_b_norm = module.lora_B.norm().item()
+                        # CRITICAL: Add LoRA contribution check
+                        lora_contribution = (module.lora_B @ module.lora_A).norm().item() * module.scaling
+                        
+                        print(f"🔍 Sample LoRA module '{name}':")
+                        print(f"   base_linear.weight norm: {base_weight_norm:.4f}")
+                        print(f"   lora_A norm: {lora_a_norm:.4f}")
+                        print(f"   lora_B norm: {lora_b_norm:.4f}")
+                        print(f"   LoRA contribution (B@A*scaling): {lora_contribution:.6f}")  # <-- Should be ~0.0
+                        print(f"   Ratio (LoRA/Base): {lora_contribution/base_weight_norm:.8f}")  # <-- Should be tiny
+                        print(f"   requires_grad: base={module.base_linear.weight.requires_grad}, A={module.lora_A.requires_grad}, B={module.lora_B.requires_grad}")
+                        
+                        if base_weight_norm > 0:
+                            sample_verified = True
+                        break
+                
+                if not sample_verified:
+                    print("❌ CRITICAL: Base linear weights appear to be zero!")
+                    raise RuntimeError("Base linear weights not properly loaded")
             
-            print(f"   After loading - Embedding size: {actual_emb_size}")
-            print(f"   After loading - Output size: {actual_out_size}")
-            print(f"   Config vocab size: {config_vocab}")
+            else:
+                # Standard loading for fine-tuning or continued pretraining
+                model_config = checkpoint_config
+                model = model_class(model_config).to(device)
+                missing, unexpected = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+                print(f"Standard loading - Missing: {len(missing)}, Unexpected: {len(unexpected)}")
             
-            if actual_emb_size != config_vocab or actual_out_size != config_vocab:
-                print(f"🚨 CONFIRMED VOCAB MISMATCH!")
-                print(f"   This WILL cause CUDA index out of bounds errors!")
-                print(f"   Solution: Train from scratch OR use matching checkpoint")
-            print("❌ Missing keys:", missing)
-            print("⚠️ Unexpected keys:", unexpected)
-            optimizer_state_dict = checkpoint.get("optimizer_state_dict", None)
-            scheduler_state_dict = checkpoint.get("scheduler_state_dict", None)
+            # Don't load optimizer/scheduler state for DAPT - use fresh state
+            if not self.is_dapt:
+                optimizer_state_dict = checkpoint.get("optimizer_state_dict", None)
+                scheduler_state_dict = checkpoint.get("scheduler_state_dict", None)
+            else:
+                print("🎯 LoRA DAPT: Using fresh optimizer and scheduler state")
+                optimizer_state_dict = None
+                scheduler_state_dict = None
+            
             model.to(device)
+            
         print(model)
         return (
             model,
-            optimizer_state_dict  if optimizer_state_dict else None,
+            optimizer_state_dict if optimizer_state_dict else None,
             scheduler_state_dict if scheduler_state_dict else None,
-            checkpoint["epoch"] if "epoch" in checkpoint else 0,
-            checkpoint["train_losses"] if "train_losses" in checkpoint else [],
-            checkpoint["val_losses"] if "val_losses" in checkpoint else [],
-            model_config,  # Return the config used to create the model
+            checkpoint.get("epoch", 0) if checkpoint else 0,
+            checkpoint.get("train_losses", []) if checkpoint else [],
+            checkpoint.get("val_losses", []) if checkpoint else [],
+            model_config,
         )
 
     def _plot_and_save_losses(epochs_seen, tokens_seen, train_losses, val_losses, save_path):
@@ -2158,7 +2259,7 @@ class Opal:
         device,
         tokenizer,
         checkpoint_path,
-        corpus_text = None, # This is the pretokenized corpus text for pretraining
+        corpus_text = None,
         num_epochs=10,
         batch_size=8,
         train_ratio=0.9,
@@ -2214,91 +2315,103 @@ class Opal:
         # ----------------------------------------
         # Load Checkpoint if available
         # ----------------------------------------
-        # During fine tune and domain adpatation we must need the previous checkpoint
+        # LoRA Domain Adaptation: Must load checkpoint for DAPT
         if (self.is_finetune or self.is_dapt) and not os.path.exists(checkpoint_path):
-            print(f"❌ Fine-tuning/DAPT requires a checkpoint, but {checkpoint_path} not found!")
+            print(f"❌ {'Fine-tuning' if self.is_finetune else 'DAPT'} requires checkpoint: {checkpoint_path} not found!")
             return None
 
         try:
-            print(f"Attempting to load model checkpoint from {checkpoint_path}...")
+            print(f"Loading model checkpoint from {checkpoint_path}...")
             model, optimizer_state_dict, scheduler_state_dict, epoch, train_losses, val_losses, _ = \
                 self.load_model_checkpoint(model_class, checkpoint_path, device, start_fresh)
             print("✅ Successfully loaded model checkpoint!")
+            
+            # LoRA Domain Adaptation: Ensure LoRA adapters are on correct device
+            if self.is_dapt or (self.is_finetune and config.get('use_lora', False)):
+                from ..attention.lora_utils import ensure_lora_device_consistency
+                ensure_lora_device_consistency(model, torch.device(device), verbose=True)
+                
         except Exception as e:
-            print(f"⚠️ No checkpoint found. Training from scratch: {e}")
-            model = model_class(config).to(device)
+            print(f"⚠️ Checkpoint loading failed: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            if self.is_dapt:
+                print("❌ DAPT requires valid checkpoint - cannot continue")
+                return None
+                
+            print("⚠️ Creating new model for training from scratch")
+            model = model_class(self.config).to(device)
             optimizer_state_dict, scheduler_state_dict = None, None
             train_losses, val_losses, epoch = [], [], 0
 
         # ----------------------------------------
-        # Optimizer
+        # Optimizer Setup
         # ----------------------------------------
-        print(f"Creating adaptive optimizer with learning rate: {lr}, {self.config.get('learning_rate', 0)}")
+        print(f"Creating optimizer with learning rate: {lr}")
         optimizer = None
 
-        # LoRA Domain Adaptation: Check if model has LoRA adapters (config or model state)
+        # LoRA Domain Adaptation: Detect LoRA state
         config_has_lora = config.get('use_lora', False)
         model_has_lora = hasattr(model, 'is_lora_enabled') and model.is_lora_enabled()
         has_lora = config_has_lora or model_has_lora
         
-        # LoRA Domain Adaptation: Enhanced debugging and validation
-        print(f"🎯 LoRA Detection Debug:")
+        print(f"🎯 LoRA Detection:")
         print(f"   Config use_lora: {config_has_lora}")
-        print(f"   Model has is_lora_enabled: {hasattr(model, 'is_lora_enabled')}")
-        if hasattr(model, 'is_lora_enabled'):
-            print(f"   Model LoRA enabled: {model.is_lora_enabled()}")
-        print(f"   Model has lora_config: {hasattr(model, 'lora_config')}")
-        print(f"   Final LoRA decision: {has_lora}")
+        print(f"   Model has LoRA: {model_has_lora}")
+        print(f"   Final LoRA enabled: {has_lora}")
         
         if has_lora:
-            print("🎯 LoRA Domain Adaptation: Creating optimizer for LoRA parameters only")
+            print("🎯 LoRA: Creating optimizer for LoRA parameters only")
             
-            # LoRA Domain Adaptation: Get only LoRA parameters for training
+            # Get LoRA parameters
             lora_params = model.get_lora_parameters()
+            
             if not lora_params:
-                print("❌ LoRA Domain Adaptation: No LoRA parameters found!")
-                print("❌ This indicates LoRA injection failed or model was not properly initialized")
-                print("❌ Available model methods:", [m for m in dir(model) if 'lora' in m.lower()])
-                raise RuntimeError("LoRA Domain Adaptation: No LoRA parameters found for training")
+                print("❌ LoRA CRITICAL: No LoRA parameters found!")
+                print("❌ Model state:")
+                print(f"   has is_lora_enabled: {hasattr(model, 'is_lora_enabled')}")
+                if hasattr(model, 'is_lora_enabled'):
+                    print(f"   is_lora_enabled(): {model.is_lora_enabled()}")
+                print(f"   has lora_config: {hasattr(model, 'lora_config')}")
+                print(f"   has get_lora_parameters: {hasattr(model, 'get_lora_parameters')}")
                 
-            print(f"🎯 LoRA Domain Adaptation: Found {len(lora_params)} LoRA parameter groups")
+                # Check for LoRA modules
+                lora_module_names = [name for name, module in model.named_modules() 
+                                    if 'LoRA' in str(type(module))]
+                print(f"   LoRA modules found: {len(lora_module_names)}")
+                if lora_module_names:
+                    print(f"   LoRA module names: {lora_module_names[:5]}")
+                
+                raise RuntimeError("LoRA: Cannot create optimizer - no LoRA parameters")
+            
+            print(f"🎯 LoRA: Found {len(lora_params)} LoRA parameter tensors")
             total_lora_params = sum(p.numel() for p in lora_params)
-            print(f"🎯 LoRA Domain Adaptation: Total LoRA parameters: {total_lora_params:,}")
+            print(f"🎯 LoRA: Total parameters: {total_lora_params:,}")
             
-            # LoRA Domain Adaptation: Validate all parameters require gradients
-            for i, param in enumerate(lora_params):
-                if not param.requires_grad:
-                    print(f"❌ LoRA Parameter {i} does not require gradients!")
-                    raise RuntimeError("LoRA Domain Adaptation: Found LoRA parameter that doesn't require gradients")
+            # Validate gradients
+            params_with_grad = sum(1 for p in lora_params if p.requires_grad)
+            print(f"🎯 LoRA: Parameters with gradients: {params_with_grad}/{len(lora_params)}")
             
-            # LoRA Domain Adaptation: Additional validation - ensure model is using LoRA
-            print(f"🔍 LoRA Model Validation:")
-            print(f"   Model has is_lora_enabled: {hasattr(model, 'is_lora_enabled')}")
-            if hasattr(model, 'is_lora_enabled'):
-                print(f"   Model is_lora_enabled(): {model.is_lora_enabled()}")
+            if params_with_grad == 0:
+                print("❌ LoRA CRITICAL: No LoRA parameters require gradients!")
+                raise RuntimeError("LoRA: No trainable parameters found")
             
-            # Check if model has lora_config
-            if hasattr(model, 'lora_config'):
-                print(f"   Model lora_config.use_lora: {model.lora_config.use_lora}")
-            
-            # Check if LoRA modules are actually injected
-            lora_module_count = 0
-            for name, module in model.named_modules():
-                if 'LoRA' in str(type(module)) or 'lora' in name.lower():
-                    lora_module_count += 1
-            print(f"   LoRA modules found in model: {lora_module_count}")
-            
-            # LoRA Domain Adaptation: Create optimizer with only LoRA parameters
+            # Create optimizer
             adamw_kwargs = dict(betas=(0.9, 0.95), lr=lr, weight_decay=weight_decay, eps=1e-8)
             try:
                 optimizer = torch.optim.AdamW(lora_params, fused=True, **adamw_kwargs)
+                print(f"🎯 LoRA: Created fused AdamW optimizer")
             except TypeError:
                 optimizer = torch.optim.AdamW(lora_params, **adamw_kwargs)
-                
-            print(f"🎯 LoRA Domain Adaptation: Optimizer created with {len(lora_params)} parameter groups")
-                
+                print(f"🎯 LoRA: Created standard AdamW optimizer")
+            
+            # Verify optimizer has parameters
+            optimizer_param_count = sum(len(group['params']) for group in optimizer.param_groups)
+            print(f"🎯 LoRA: Optimizer managing {optimizer_param_count} parameter groups")
+            
         elif self.is_finetune:
-            # LoRA Domain Adaptation: Standard fine-tuning optimizer (when LoRA is not used)
+            # Standard fine-tuning optimizer
             decay, no_decay = set(), set()
             param_dict = {n: p for n, p in model.named_parameters()}
             for name, p in model.named_parameters():
@@ -2318,22 +2431,22 @@ class Opal:
                 optimizer = torch.optim.AdamW(optim_groups, fused=True, **adamw_kwargs)
             except TypeError:
                 optimizer = torch.optim.AdamW(optim_groups, **adamw_kwargs)
-            print("✅ Fine-tuning optimizer with weight decay on applicable parameters")
+            print("✅ Fine-tuning optimizer with weight decay")
         else:
-            # LoRA Domain Adaptation: Standard full-model training optimizer
+            # Standard pretraining optimizer
             optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+            print("✅ Pretraining optimizer created")
         
-        # LoRA Domain Adaptation: Handle optimizer state loading (skip for LoRA training)
-        # 🔧 CRITICAL FIX: For fine-tuning or LoRA, do NOT load optimizer state to ensure fresh learning rate
-        if optimizer_state_dict and not self.is_finetune and not has_lora:
-            print("✅ Loading optimizer state from checkpoint (pretraining mode)")
+        # LoRA Domain Adaptation: Skip loading optimizer state for DAPT
+        if optimizer_state_dict and not self.is_finetune and not self.is_dapt:
+            print("✅ Loading optimizer state (pretraining)")
             optimizer.load_state_dict(optimizer_state_dict)
-        elif has_lora:
-            print("🎯 LoRA Domain Adaptation: Starting with fresh optimizer state for LoRA training")
+        elif self.is_dapt:
+            print("🎯 LoRA DAPT: Using fresh optimizer state")
         elif self.is_finetune:
-            print("🔧 Fine-tuning mode: Starting with fresh optimizer state (preserving new learning rate)")
+            print("🔧 Fine-tuning: Using fresh optimizer state")
         else:
-            print("✅ No optimizer state to load (training from scratch)")
+            print("✅ No optimizer state to load")
 
         # ----------------------------------------
         # Data Loading
@@ -2456,7 +2569,7 @@ class Opal:
             )
 
         # ----------------------------------------
-        # Scheduler with Warmup + CosineAnnealingLR  #Finetune-Optional
+        # Scheduler
         # ----------------------------------------
         total_steps = num_epochs * len(training_loader)
         cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -2465,16 +2578,16 @@ class Opal:
 
         print("✅ Created learning rate scheduler")
         
-        # 🔧 CRITICAL FIX: For fine-tuning and DAPT, do NOT load scheduler state to ensure fresh learning schedule
+        # LoRA Domain Adaptation: Skip loading scheduler state for DAPT
         if scheduler_state_dict and not is_finetune and not self.is_dapt:
-            print("✅ Loading scheduler state from checkpoint (pretraining mode)")
+            print("✅ Loading scheduler state (pretraining)")
             cosine_scheduler.load_state_dict(scheduler_state_dict)
-        elif is_finetune:
-            print("🔧 Fine-tuning mode: Starting with fresh scheduler state (preserving new learning schedule)")
         elif self.is_dapt:
-            print("🎯 DAPT mode: Starting with fresh scheduler state for optimal domain adaptation")
+            print("🎯 LoRA DAPT: Using fresh scheduler state")
+        elif is_finetune:
+            print("🔧 Fine-tuning: Using fresh scheduler state")
         else:
-            print("✅ No scheduler state to load (training from scratch)")
+            print("✅ No scheduler state to load")
 
         # ----------------------------------------
         # Training Loop
@@ -2484,33 +2597,75 @@ class Opal:
         train_losses, val_losses, tokens_seen = [], [], []
 
         print("✅ Starting training loop ^^^^^^^^^^^^ ")
-        # for epoch_idx in range(num_epochs):
-        #     print(f"Epoch {epoch_idx + 1}/{num_epochs}")
-        #     for step, batch in enumerate(training_loader):
-        #         input_ids, labels = batch
-        #         model_output = model(input_ids, labels)
-        #         loss = model_output["loss"] / config.get("gradient_accumulation_steps", 1)
-        #         loss.backward()
-
-        #         if (step + 1) % config.get("gradient_accumulation_steps", 1) == 0:
-        #             torch.nn.utils.clip_grad_norm_(
-        #                 model.parameters(), config.get("max_grad_norm", 1.0)
-        #             )
-        #             optimizer.step()
-        #             optimizer.zero_grad()
-
-        #             if global_step < config.get("warmup_steps", 0):
-        #                 warmup_scheduler.step()
-        #             else:
-        #                 cosine_scheduler.step()
-
-        #             global_step += 1
-
-        #     # Validation step
-        #     if (epoch_idx + 1) % eval_freq == 0:
-        #         val_loss = self.evaluate_model(model, val_loader, device)
-        #         val_losses.append(val_loss)
-
+        
+        # LoRA Domain Adaptation: CRITICAL - Verify LoRA is actually being used in forward pass
+        if has_lora:
+            print("🔍 LoRA DAPT: CRITICAL pre-training verification...")
+            model.train()  # Ensure we're in training mode
+            
+            # Create a test batch
+            test_input = torch.randint(0, config['vocab_size'], (2, 10)).to(device)
+            
+            # Forward pass
+            test_output = model(test_input)
+            test_loss = test_output['logits'].sum()
+            
+            print(f"   Test loss requires_grad: {test_loss.requires_grad}")
+            
+            if not test_loss.requires_grad:
+                print("❌ CRITICAL: Forward pass test FAILED - loss has no gradients!")
+                print("❌ This means LoRA modules are NOT in the computation graph")
+                
+                # Debug: Check which modules are actually being called
+                print("🔍 Checking module call stack...")
+                
+                # Check if LoRA modules exist
+                from ..attention.lora import LoRAInjectedLinear
+                lora_module_count = 0
+                for name, module in model.named_modules():
+                    if isinstance(module, LoRAInjectedLinear):
+                        lora_module_count += 1
+                        print(f"   Found LoRA module: {name}")
+                        print(f"     base_linear.weight.requires_grad: {module.base_linear.weight.requires_grad}")
+                        print(f"     lora_A.requires_grad: {module.lora_A.requires_grad}")
+                        print(f"     lora_B.requires_grad: {module.lora_B.requires_grad}")
+                        break  # Just show first one
+                
+                print(f"   Total LoRA modules: {lora_module_count}")
+                
+                # Check model structure - are attention layers using LoRA?
+                print("🔍 Checking transformer block structure...")
+                if len(model.transformers_block) > 0:
+                    first_block = model.transformers_block[0]
+                    print(f"   First block type: {type(first_block)}")
+                    if hasattr(first_block, 'mhAttention'):
+                        print(f"   Has mhAttention: {type(first_block.mhAttention)}")
+                        attn = first_block.mhAttention
+                        if hasattr(attn, 'Wq'):
+                            print(f"   Wq type: {type(attn.Wq)}")
+                            print(f"   Wq is LoRAInjectedLinear: {isinstance(attn.Wq, LoRAInjectedLinear)}")
+                
+                raise RuntimeError("LoRA DAPT: Forward pass does not use LoRA modules!")
+            
+            # Try backward
+            test_loss.backward()
+            
+            # Check if LoRA params got gradients
+            lora_grads = 0
+            for name, param in model.named_parameters():
+                if ('lora_A' in name or 'lora_B' in name) and param.grad is not None:
+                    lora_grads += 1
+            
+            print(f"   LoRA params with gradients after backward: {lora_grads}")
+            
+            if lora_grads == 0:
+                print("❌ CRITICAL: No LoRA parameters received gradients!")
+                raise RuntimeError("LoRA parameters not receiving gradients in training mode")
+            
+            # Clear test gradients
+            model.zero_grad()
+            print("✅ LoRA pre-training verification PASSED")
+        
         print("✅ Starting training loop")
         train_losses, val_losses, track_tokens_seen = self.train_model_simple(
             model=model,
@@ -2546,5 +2701,5 @@ class Opal:
         )
         print(f"✅ Final checkpoint saved: {final_checkpoint_path}")
         
-        # FINETUNE_PH2: Return training results with correct variable name
+        # FINETUNE_PH2: Return training results
         return train_losses, val_losses, track_tokens_seen

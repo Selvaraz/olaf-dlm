@@ -217,6 +217,7 @@ def freeze_base_model_weights(model: nn.Module, verbose: bool = True) -> int:
     """
     frozen_count = 0
     trainable_count = 0
+    lora_param_count = 0
     
     # LoRA Domain Adaptation: Freeze all non-LoRA parameters
     for name, param in model.named_parameters():
@@ -224,18 +225,21 @@ def freeze_base_model_weights(model: nn.Module, verbose: bool = True) -> int:
             # LoRA Domain Adaptation: Keep LoRA parameters trainable
             param.requires_grad = True
             trainable_count += param.numel()
+            lora_param_count += param.numel()
             if verbose:
                 print(f"LoRA Domain Adaptation: Keeping trainable: {name} ({param.numel()} params)")
-        elif 'out_head' in name or 'out_proj' in name:
-            # LoRA Domain Adaptation: Keep output layers trainable for gradient flow
-            param.requires_grad = True
-            trainable_count += param.numel()
-            if verbose:
-                print(f"LoRA Domain Adaptation: Keeping output layer trainable: {name} ({param.numel()} params)")
         else:
             # LoRA Domain Adaptation: Freeze base model parameters
             param.requires_grad = False
             frozen_count += param.numel()
+    
+    # LoRA Domain Adaptation: Validate that LoRA parameters were found
+    if lora_param_count == 0:
+        raise RuntimeError(
+            "LoRA Domain Adaptation: No LoRA parameters found! "
+            "This indicates LoRA injection failed or was not performed. "
+            "Please check that inject_lora_into_model() was called successfully."
+        )
             
     if verbose:
         total_params = frozen_count + trainable_count
@@ -245,6 +249,36 @@ def freeze_base_model_weights(model: nn.Module, verbose: bool = True) -> int:
         
     return frozen_count
 
+
+def ensure_lora_device_consistency(model: nn.Module, device: torch.device, verbose: bool = True) -> None:
+    """
+    LoRA Domain Adaptation: Ensure all LoRA parameters are on the correct device.
+    
+    This function should be called after model.to(device) to ensure LoRA adapters
+    are properly moved to the target device. This is important because LoRA injection
+    happens during __init__ and device moves can happen afterwards.
+    
+    Args:
+        model: The model with LoRA adapters injected
+        device: Target device for the model
+        verbose: Whether to print device move information
+    """
+    moved_count = 0
+    
+    for name, module in model.named_modules():
+        if isinstance(module, LoRAInjectedLinear):
+            # Check if LoRA parameters are on the wrong device
+            if module.lora_A.device != device or module.lora_B.device != device:
+                module.lora_A.data = module.lora_A.data.to(device)
+                module.lora_B.data = module.lora_B.data.to(device)
+                moved_count += 1
+                if verbose:
+                    print(f"LoRA Domain Adaptation: Moved {name} adapters to {device}")
+    
+    if verbose and moved_count > 0:
+        print(f"LoRA Domain Adaptation: Moved {moved_count} adapter modules to {device}")
+    elif verbose:
+        print(f"LoRA Domain Adaptation: All adapters already on {device}")
 
 def get_lora_parameters(model: nn.Module) -> List[torch.nn.Parameter]:
     """
@@ -274,31 +308,65 @@ def merge_lora_weights(model: nn.Module, verbose: bool = True) -> nn.Module:
     """
     LoRA Domain Adaptation: Merge LoRA adapter weights into base model weights.
     
-    This function merges all LoRA adapters in the model into their corresponding
-    base linear layers. After merging, the model behaves identically but no
-    longer requires the LoRA computation path.
-    
-    Args:
-        model: The model with LoRA adapters to merge
-        verbose: Whether to print merging information
-        
-    Returns:
-        nn.Module: The model with merged weights
+    🔧 CRITICAL FIX: Converts LoRAInjectedLinear back to standard nn.Linear
+    with merged weights for proper checkpoint structure.
     """
-    merged_count = 0
+    import copy
     
-    # LoRA Domain Adaptation: Merge all LoRA adapters
-    for name, module in model.named_modules():
-        if isinstance(module, LoRAInjectedLinear):
-            module.merge_adapters()
-            merged_count += 1
-            if verbose:
-                print(f"LoRA Domain Adaptation: Merged adapters in {name}")
+    if verbose:
+        print("🎯 LoRA: Creating deep copy of model before merge...")
+    
+    model_copy = copy.deepcopy(model)
+    
+    merged_count = 0
+    replaced_count = 0
+    
+    # LoRA Domain Adaptation: Merge all LoRA adapters in the COPY and replace with nn.Linear
+    for name, parent_module in list(model_copy.named_modules()):  # 🔧 FIX: Use list() to avoid iterator issues
+        # Check each child of this module
+        for child_name, child_module in list(parent_module.named_children()):  # 🔧 FIX: Use list()
+            if isinstance(child_module, LoRAInjectedLinear):
+                # 🔧 CRITICAL: First merge the adapters
+                child_module.merge_adapters()
+                merged_count += 1
                 
+                # 🔧 CRITICAL: Extract merged weights from base_linear
+                merged_weight = child_module.base_linear.weight.data.clone()
+                merged_bias = child_module.base_linear.bias.data.clone() if child_module.base_linear.bias is not None else None
+                
+                # 🔧 CRITICAL: Create standard nn.Linear with merged weights
+                in_features = child_module.base_linear.in_features
+                out_features = child_module.base_linear.out_features
+                has_bias = child_module.base_linear.bias is not None
+                
+                # Create new standard linear layer
+                merged_linear = nn.Linear(in_features, out_features, bias=has_bias)
+                merged_linear.weight.data = merged_weight
+                if has_bias:
+                    merged_linear.bias.data = merged_bias
+                
+                # 🔧 CRITICAL: Replace LoRAInjectedLinear with standard nn.Linear
+                setattr(parent_module, child_name, merged_linear)
+                replaced_count += 1
+                
+                if verbose:
+                    print(f"LoRA Domain Adaptation: Merged and replaced {name}.{child_name}")
+    
     if verbose:
         print(f"LoRA Domain Adaptation: Successfully merged {merged_count} LoRA adapters")
+        print(f"LoRA Domain Adaptation: Replaced {replaced_count} LoRAInjectedLinear with nn.Linear")
+        print(f"🎯 LoRA: Converted to standard nn.Linear layers (no LoRA structure)")
         
-    return model
+        # 🔧 VERIFICATION: Check the merged model has NO LoRA structure
+        lora_modules_remaining = sum(1 for m in model_copy.modules() if isinstance(m, LoRAInjectedLinear))
+        if lora_modules_remaining > 0:
+            print(f"❌ WARNING: {lora_modules_remaining} LoRAInjectedLinear modules still in model!")
+        else:
+            print(f"✅ VERIFIED: No LoRAInjectedLinear modules in merged model")
+        
+        print(f"🎯 LoRA: Original model unchanged, returning merged copy")
+        
+    return model_copy
 
 
 def unload_lora_weights(model: nn.Module, verbose: bool = True) -> nn.Module:
@@ -504,6 +572,7 @@ def get_model_lora_info(model: nn.Module) -> Dict[str, Any]:
     for name, module in model.named_modules():
         if isinstance(module, LoRAInjectedLinear):
             lora_params = module.lora_A.numel() + module.lora_B.numel()
+            # 🔧 FIXED: Access base_linear.weight, not module.weight
             base_params = module.base_linear.weight.numel()
             if module.base_linear.bias is not None:
                 base_params += module.base_linear.bias.numel()

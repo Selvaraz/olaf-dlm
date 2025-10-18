@@ -40,9 +40,7 @@ class OpalGPT(nn.Module):
 
         # The output head is a linear layer that maps the output of the final layer
         # normalization to the vocabulary size
-        self.out_head = nn.Linear(
-            cfg["emb_dim"], cfg["vocab_size"], bias=False
-        )
+        self.out_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False)
         # tie embeddings
         self.out_head.weight = self.token_embeddings.weight
 
@@ -270,9 +268,33 @@ class OpalGPT(nn.Module):
         return self.lora_config.use_lora and len(self.lora_injected_modules) > 0
     
     def get_lora_parameters(self):
-        """LoRA Domain Adaptation: Get all LoRA parameters for optimizer creation."""
-        from ..attention.lora_utils import get_lora_parameters
-        return get_lora_parameters(self)
+        """
+        LoRA Domain Adaptation: Get all LoRA parameters for optimizer creation.
+        
+        Returns:
+            List[torch.nn.Parameter]: List of LoRA parameters that require gradients
+        """
+        if not self.is_lora_enabled():
+            print("❌ LoRA Domain Adaptation: LoRA not enabled, no parameters to return")
+            return []
+        
+        # LoRA Domain Adaptation: Directly collect LoRA parameters from model
+        lora_params = []
+        for name, param in self.named_parameters():
+            if ('lora_A' in name or 'lora_B' in name) and param.requires_grad:
+                lora_params.append(param)
+        
+        if not lora_params:
+            print("❌ LoRA Domain Adaptation: No LoRA parameters found in model!")
+            print("❌ This indicates LoRA injection failed or parameters were not properly initialized")
+            
+            # Debug: Check what parameters we have
+            print("🔍 Available parameters:")
+            for name, param in self.named_parameters():
+                if 'lora' in name.lower() or 'Wq' in name or 'Wk' in name or 'Wv' in name:
+                    print(f"   {name}: requires_grad={param.requires_grad}, shape={param.shape}")
+        
+        return lora_params
     
     def merge_lora_weights(self, verbose: bool = True):
         """LoRA Domain Adaptation: Merge LoRA adapter weights into base model."""

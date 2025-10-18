@@ -172,9 +172,10 @@ _PHASE_CONFIGS = {
     
     "domain_adaptation": {
         **_GPT_CONFIG_OPAL_45M,
-        "learning_rate": 1e-4,        # Lower LR for domain adaptation
-        "num_epoch": 6,               # More focused training on domain data
-        "early_stopping_patience": 3,
+        # 🔧 FIXED: Adjusted for 1.3GB corpus (small domain-specific dataset)
+        "learning_rate": 1e-4,        # Lower LR for domain adaptation (1.3GB corpus)
+        "num_epoch": 4,               # ⚠️ REDUCED from 6 to 4 for 1.3GB (prevent overfitting)
+        "early_stopping_patience": 2, # ⚠️ REDUCED from 3 to 2 (more aggressive early stopping)
         "weight_decay": 0.05,         # Reduced weight decay
         "gradient_accumulation_steps": 4,
         # LoRA Domain Adaptation: Core LoRA configuration for domain adaptation phase
@@ -183,7 +184,7 @@ _PHASE_CONFIGS = {
         "lora_alpha": 64,             # LoRA Domain Adaptation: LoRA scaling factor (alpha) - typically 2*rank
         "lora_dropout": 0.1,          # LoRA Domain Adaptation: Dropout for LoRA layers
         "target_modules": ["Wq", "Wk", "Wv", "out_proj"],  # LoRA Domain Adaptation: attention projections to inject LoRA
-        "lora_include_mlp": True,    # LoRA Domain Adaptation: Whether to include MLP layers in LoRA injection
+        "lora_include_mlp": True,     # LoRA Domain Adaptation: Whether to include MLP layers in LoRA injection
         # LoRA Domain Adaptation: Export and checkpointing configuration
         "export": {
             "merge_on_finalize": True,  # LoRA Domain Adaptation: Merge LoRA weights on training completion

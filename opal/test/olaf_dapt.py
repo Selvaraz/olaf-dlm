@@ -82,8 +82,8 @@ def model_dapt_train(start_fresh=False):
         lr=DAPT_CONFIG["learning_rate"],     # Use config learning rate
         weight_decay=DAPT_CONFIG["weight_decay"],
         start_fresh=start_fresh,
-        eval_iter=5,        # DEBUG: Small evaluation for fast debugging  
-        eval_freq=10,       # DEBUG: Evaluate every 10 steps for rapid issue detection
+        eval_iter=500,        # 🔧 OPTIMIZED: 500 batches (6,000 samples) - stable metrics on H200
+        eval_freq=2000,       # 🔧 OPTIMIZED: Every 2,000 steps (~8k batches, ~13 evals/epoch)
         batch_size=TRAINING_CONFIG["batch_size"],
     )
 

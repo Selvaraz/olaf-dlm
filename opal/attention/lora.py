@@ -101,9 +101,11 @@ class LoRAInjectedLinear(nn.Module):
         if self.merged:
             # LoRA Domain Adaptation: If merged, adapters are already in base weights
             return base_out
-            
+        
         # LoRA Domain Adaptation: Compute LoRA adaptation path
         # x @ A.T -> (B, T, rank), then @ B.T -> (B, T, out_features)
+        # Note: We don't move parameters here to avoid breaking gradient tracking
+        # The model should ensure all parameters are on the same device before forward
         lora_out = (self.lora_dropout(x) @ self.lora_A.t()) @ self.lora_B.t()
         
         # LoRA Domain Adaptation: Apply scaling and add to base output

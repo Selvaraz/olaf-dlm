@@ -108,16 +108,12 @@ def load_model_and_tokenizer(checkpoint_path, tokenizer_path, device="auto"):
             config['vocab_size'] = vocab_size
         
         # 🔧 CRITICAL FIX: Handle LoRA merged checkpoints properly
-        # If this is a merged checkpoint, disable LoRA to avoid double computation
         is_merged_checkpoint = 'merged' in str(checkpoint_path) or checkpoint.get('is_merged', False)
-        
+
         if is_merged_checkpoint:
             print(f"🎯 Detected LoRA merged checkpoint - disabling LoRA injection for performance")
-            print(f"   Original config use_lora: {config.get('use_lora', False)}")
-            config = config.copy()  # Don't modify original config
-            config['use_lora'] = False
-            print(f"   Forced config use_lora: {config.get('use_lora', False)}")
-        
+            config['use_lora'] = False  # Adapters already baked in, don't inject again!
+
         # Create model with optimized LoRA handling
         print(f"🔧 Creating model with use_lora={config.get('use_lora', False)}")
         model = OpalGPT(config)
@@ -134,6 +130,11 @@ def load_model_and_tokenizer(checkpoint_path, tokenizer_path, device="auto"):
         
         # Load model state with proper error handling
         try:
+            # 🔧 SIMPLIFIED: Merged checkpoints should already have standard nn.Linear structure
+            if is_merged_checkpoint:
+                print(f"🎯 Loading merged checkpoint (standard nn.Linear structure expected)...")
+                # No extraction needed - merged checkpoints are already clean!
+            
             missing, unexpected = model.load_state_dict(model_state, strict=False)
             
             if missing or unexpected:
@@ -141,25 +142,32 @@ def load_model_and_tokenizer(checkpoint_path, tokenizer_path, device="auto"):
                 print(f"   Missing keys: {len(missing)} (first 3: {missing[:3] if missing else 'none'})")
                 print(f"   Unexpected keys: {len(unexpected)} (first 3: {unexpected[:3] if unexpected else 'none'})")
                 
-                # Check if this looks like a LoRA structure mismatch
-                lora_related_missing = [k for k in missing if 'lora' in k.lower() or 'base_linear' in k.lower()]
+                # 🔧 ONLY NOW: If merged checkpoint still has LoRA structure, extract it
                 lora_related_unexpected = [k for k in unexpected if 'lora' in k.lower() or 'base_linear' in k.lower()]
                 
-                if lora_related_missing or lora_related_unexpected:
-                    print(f"🎯 LoRA structure mismatch detected!")
-                    print(f"   LoRA missing: {len(lora_related_missing)}")
-                    print(f"   LoRA unexpected: {len(lora_related_unexpected)}")
+                if is_merged_checkpoint and lora_related_unexpected:
+                    print(f"🚨 BUG DETECTED: Merged checkpoint still has LoRA structure!")
+                    print(f"🚨 This means merge_lora_weights() didn't work properly")
+                    print(f"🔧 Applying emergency extraction...")
                     
-                    # If we have LoRA structure issues, try loading with LoRA disabled
-                    if config_has_lora and (lora_related_missing or lora_related_unexpected):
-                        print(f"🔧 Attempting to load with LoRA disabled...")
-                        config_no_lora = config.copy()
-                        config_no_lora['use_lora'] = False
-                        
-                        # Recreate model without LoRA
-                        model = OpalGPT(config_no_lora)
-                        missing2, unexpected2 = model.load_state_dict(model_state, strict=False)
-                        print(f"✅ Retry results: missing={len(missing2)}, unexpected={len(unexpected2)}")
+                    # Emergency extraction
+                    cleaned_state = {}
+                    for key, value in model_state.items():
+                        if '.base_linear.weight' in key:
+                            new_key = key.replace('.base_linear.weight', '.weight')
+                            cleaned_state[new_key] = value
+                        elif '.base_linear.bias' in key:
+                            new_key = key.replace('.base_linear.bias', '.bias')
+                            cleaned_state[new_key] = value
+                        elif '.lora_A' not in key and '.lora_B' not in key and '.base_linear' not in key:
+                            cleaned_state[key] = value
+                    
+                    print(f"🔧 Cleaned state dict: {len(model_state)} -> {len(cleaned_state)} keys")
+                    model_state = cleaned_state
+                    
+                    # Retry loading
+                    missing2, unexpected2 = model.load_state_dict(model_state, strict=False)
+                    print(f"✅ Emergency extraction results: missing={len(missing2)}, unexpected={len(unexpected2)}")
             else:
                 print(f"✅ Model state loaded successfully with no mismatches")
                 
@@ -365,7 +373,6 @@ def generate_alternative_paths(token_alternatives, tokenizer):
                 'rank': rank,
                 'description': f'{rank}{"nd" if rank==2 else "rd" if rank==3 else "th"} highest probability path'
             }
-    
     return alternative_paths
 
 def generate_temperature_sweep(model, tokenizer, prompt, config, device, base_params, num_variations=10):
@@ -691,6 +698,43 @@ def generate_with_params(model, tokenizer, prompt, config, device, **gen_params)
                                     next_token_logits[token_id] /= repetition_penalty
                                 else:
                                     next_token_logits[token_id] *= repetition_penalty
+                    elif fast_mode and repetition_penalty != 1.0:
+                        # 🔧 CRITICAL FIX: Apply LIGHTWEIGHT repetition penalty in fast mode
+                        # Use only last 20 tokens (instead of 50) for speed
+                        recent_tokens = set(current_ids[-20:])
+                        for token_id in recent_tokens:
+                            if token_id < len(next_token_logits):
+                                # Simplified penalty (no branch for positive/negative)
+                                next_token_logits[token_id] /= repetition_penalty
+
+                    # 🔧 CRITICAL FIX: Apply repetition penalties even in fast mode
+                    if repetition_penalty != 1.0:
+                        if fast_mode:
+                            # Lightweight penalty: only last 20 tokens
+                            recent_tokens = set(current_ids[-20:])
+                            for token_id in recent_tokens:
+                                if token_id < len(next_token_logits):
+                                    next_token_logits[token_id] /= repetition_penalty
+                        else:
+                            # Full penalty: last 50 tokens with positive/negative handling
+                            recent_tokens = set(current_ids[-50:])
+                            for token_id in recent_tokens:
+                                if token_id < len(next_token_logits):
+                                    if next_token_logits[token_id] > 0:
+                                        next_token_logits[token_id] /= repetition_penalty
+                                    else:
+                                        next_token_logits[token_id] *= repetition_penalty
+                    
+                    # 🔧 CRITICAL FIX: Block exact phrase repetition (fast n-gram check)
+                    if step > 5 and len(current_ids) >= 8:
+                        # Detect 4-gram loops
+                        last_4 = tuple(current_ids[-4:])
+                        prev_4 = tuple(current_ids[-8:-4])
+                        if last_4 == prev_4:
+                            # Heavily penalize continuing the loop
+                            for token_id in last_4:
+                                if token_id < len(next_token_logits):
+                                    next_token_logits[token_id] -= 5.0
                     
                     # 🚀 PERFORMANCE: Skip expensive probability calculations in fast mode
                     if not fast_mode:
@@ -1616,47 +1660,56 @@ def main():
             gen_params['fast_mode'] = True
             print(f"🚀 Fast mode enabled - optimized for performance")
         
-        # Generate
-        print(f"\n🚀 Generating for: '{args.prompt}'")
-        full_text, generated_text, metadata = generate_with_params(
-            model, tokenizer, args.prompt, config, device, **gen_params
-        )
-        
-        # Display results
-        if 'error' not in metadata:
-            print(f"\n📝 Generated ({metadata['generated_length']} tokens):")
-            print(f"{generated_text.strip()}")
+        # 🔧 CRITICAL FIX: Add try-except block for generation
+        try:
+            # Generate
+            print(f"\n🚀 Generating for: '{args.prompt}'")
+            full_text, generated_text, metadata = generate_with_params(
+                model, tokenizer, args.prompt, config, device, **gen_params
+            )
             
-            # Show text with probabilities if available
-            if metadata.get('generated_with_probabilities'):
-                print(f"\n🎯 Generated text with probabilities:")
-                print(f"{metadata['generated_with_probabilities']}")
-            
-            # Show alternatives table if available
-            if metadata.get('alternatives_table'):
-                print(metadata['alternatives_table'])
-            
-            # Show alternative generation paths if available
-            if metadata.get('alternative_generations'):
-                print("\n🎲 ALTERNATIVE GENERATION PATHS")
-                print("=" * 50)
-                alt_gens = metadata['alternative_generations']
-                for rank in range(2, 7):
-                    path_key = f"rank_{rank}_path"
-                    if path_key in alt_gens:
-                        path = alt_gens[path_key]
-                        print(f"🔸 {path['description']}:")
-                        print(f"   Text: '{path['text']}'")
-                        print(f"   With probabilities: '{path['text_with_probs']}'")
-                        print()
-            
-            # Show temperature sweep results if available
-            if metadata.get('temperature_sweep_table'):
-                print(metadata['temperature_sweep_table'])
-            
-            print(f"\n📊 Stopped: {metadata['stopped_reason']}")
-        else:
-            print(f"❌ Error: {metadata['error']}")
+            # Display results
+            if 'error' not in metadata:
+                print(f"\n📝 Generated ({metadata['generated_length']} tokens):")
+                print(f"{generated_text.strip()}")
+                
+                # Show text with probabilities if available
+                if metadata.get('generated_with_probabilities'):
+                    print(f"\n🎯 Generated text with probabilities:")
+                    print(f"{metadata['generated_with_probabilities']}")
+                
+                # Show alternatives table if available
+                if metadata.get('alternatives_table'):
+                    print(metadata['alternatives_table'])
+                
+                # Show alternative generation paths if available
+                if metadata.get('alternative_generations'):
+                    print("\n🎲 ALTERNATIVE GENERATION PATHS")
+                    print("=" * 50)
+                    alt_gens = metadata['alternative_generations']
+                    for rank in range(2, 7):
+                        path_key = f"rank_{rank}_path"
+                        if path_key in alt_gens:
+                            path = alt_gens[path_key]
+                            print(f"🔸 {path['description']}:")
+                            print(f"   Text: '{path['text']}'")
+                            print(f"   With probabilities: '{path['text_with_probs']}'")
+                            print()
+                
+                # Show temperature sweep results if available
+                if metadata.get('temperature_sweep_table'):
+                    print(metadata['temperature_sweep_table'])
+                
+                print(f"\n📊 Stopped: {metadata['stopped_reason']}")
+            else:
+                print(f"❌ Error: {metadata['error']}")
+                
+        except KeyboardInterrupt:
+            print("\n\n👋 Interrupted by user")
+            return 0
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            return 1
     else:
         # Interactive mode (default)
         interactive_mode(model, tokenizer, config, device)
